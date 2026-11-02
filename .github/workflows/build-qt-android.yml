@@ -1,0 +1,317 @@
+name: build-qt-android
+
+on:
+  workflow_dispatch:
+    inputs:
+      qt_version:
+        description: "Qt 源码版本（默认 6.12.0）"
+        required: false
+        default: "6.12.0"
+      modules:
+        description: "要构建的 Qt 子模块（空格分隔，必须含 qtbase）"
+        required: false
+        default: "qtbase qtdeclarative qttools qtshadertools"
+      host_only:
+        description: "仅构建 host 工具（调试用）"
+        required: false
+        type: boolean
+        default: false
+      runner:
+        description: "Runner 标签"
+        required: false
+        default: "windows-2022"
+  push:
+    tags:
+      - "qt-*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-qt-android-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ${{ inputs.runner || 'windows-2022' }}
+    timeout-minutes: 360
+    env:
+      QT_VERSION: ${{ inputs.qt_version || '6.12.0' }}
+      QT_MODULES: ${{ inputs.modules || 'qtbase qtdeclarative qttools qtshadertools' }}
+      HOST_ONLY: ${{ inputs.host_only || 'false' }}
+      QT_ABI: arm64-v8a
+      WORK_ROOT: D:\qt
+      SRC_ROOT: D:\qt\src
+      ARCHIVE_DIR: D:\qt\archives
+      HOST_BUILD_DIR: D:\qt\host-build
+      HOST_PREFIX: D:\qt\host
+      TARGET_BUILD_DIR: D:\qt\target-build
+      TARGET_PREFIX: D:\qt\android_arm64_v8a
+      TOOLS_DIR: C:\tools
+      ANDROID_SDK_ROOT: C:\android\sdk
+      ANDROID_NDK_ROOT: C:\android\ndk\android-ndk-r27c
+      NDK_VERSION: r27c
+      SDK_PLATFORM: android-37.0
+      SDK_BUILD_TOOLS: 37.0.0
+      CMDLINE_TOOLS_VERSION: "19.0"
+      MINGW_VERSION: 15.1.0
+      CMAKE_VERSION: 4.3.2
+      NINJA_VERSION: 1.10.2
+      PERL_VERSION: 5.42.2.1
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Disk space (before)
+        shell: pwsh
+        run: |
+          Get-PSDrive -PSProvider FileSystem |
+            Select-Object Name, @{n='FreeGB'; e={[math]::Round($_.Free / 1GB, 1)}} |
+            Format-Table
+          # 删除镜像自带的 Android SDK，本流程使用固定版本的独立安装
+          Remove-Item 'C:\Android' -Recurse -Force -ErrorAction SilentlyContinue
+
+      - name: Compute cache key suffix
+        shell: pwsh
+        run: |
+          $key = ($env:QT_MODULES -replace '[, ]+', '-').ToLowerInvariant()
+          "MODULE_KEY=$key" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Cache Android SDK / NDK
+        uses: actions/cache@v4
+        with:
+          path: C:\android
+          key: android-${{ env.NDK_VERSION }}-${{ env.SDK_PLATFORM }}-${{ env.SDK_BUILD_TOOLS }}-${{ env.CMDLINE_TOOLS_VERSION }}-v1
+
+      - name: Cache Qt source archive
+        uses: actions/cache@v4
+        with:
+          path: D:\qt\archives
+          key: qt-src-${{ env.QT_VERSION }}-v1
+
+      - name: Cache host Qt prefix
+        uses: actions/cache@v4
+        with:
+          path: D:\qt\host
+          key: qt-host-${{ env.QT_VERSION }}-${{ env.MODULE_KEY }}-mingw${{ env.MINGW_VERSION }}-cmake${{ env.CMAKE_VERSION }}-v1
+
+      - name: Setup JDK 21.0.9
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21.0.9"
+          architecture: x64
+
+      - name: Setup Python 3.11.9
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11.9"
+          architecture: x64
+
+      - name: Install build tools (MinGW 15.1.0 / CMake 4.3.2 / Ninja 1.10.2 / Strawberry Perl)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Get-File([string]$Url, [string]$Out) {
+            curl.exe -L --fail --retry 5 --retry-delay 10 --max-time 1800 -o $Out $Url
+            if ($LASTEXITCODE -ne 0) { throw "下载失败: $Url" }
+          }
+          New-Item -ItemType Directory -Force -Path $env:TOOLS_DIR | Out-Null
+
+          # 7-Zip 24.09（仅用于打包/解压）
+          Get-File 'https://www.7-zip.org/a/7z2409-x64.exe' "$env:TOOLS_DIR\7z-installer.exe"
+          Start-Process -Wait -FilePath "$env:TOOLS_DIR\7z-installer.exe" -ArgumentList '/S', "/D=$env:TOOLS_DIR\7zip"
+          "SEVEN_ZIP=$env:TOOLS_DIR\7zip\7z.exe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+          # MinGW-w64 15.1.0 (posix-seh, msvcrt)，对应 Qt 6.12 官方 Windows 构建配置
+          Get-File 'https://github.com/niXman/mingw-builds-binaries/releases/download/15.1.0-rt_v12-rev0/x86_64-15.1.0-release-posix-seh-msvcrt-rt_v12-rev0.7z' "$env:TOOLS_DIR\mingw.7z"
+          & "$env:TOOLS_DIR\7zip\7z.exe" x -y "-o$env:TOOLS_DIR" "$env:TOOLS_DIR\mingw.7z"
+          if ($LASTEXITCODE -ne 0) { throw 'MinGW 解压失败' }
+
+          # CMake 4.3.2
+          Get-File 'https://github.com/Kitware/CMake/releases/download/v4.3.2/cmake-4.3.2-windows-x86_64.zip' "$env:TOOLS_DIR\cmake.zip"
+          Expand-Archive "$env:TOOLS_DIR\cmake.zip" "$env:TOOLS_DIR\cmake-tmp" -Force
+          Move-Item "$env:TOOLS_DIR\cmake-tmp\cmake-4.3.2-windows-x86_64" "$env:TOOLS_DIR\cmake" -Force
+
+          # Ninja 1.10.2
+          Get-File 'https://github.com/ninja-build/ninja/releases/download/v1.10.2/ninja-win.zip' "$env:TOOLS_DIR\ninja.zip"
+          Expand-Archive "$env:TOOLS_DIR\ninja.zip" "$env:TOOLS_DIR\ninja" -Force
+
+          # Strawberry Perl 便携版（Qt 构建脚本依赖 perl；官方页未列该版本）
+          Get-File 'https://github.com/StrawberryPerl/Perl-Dist-Strawberry/releases/download/SP_54221_64bit/strawberry-perl-5.42.2.1-64bit-portable.zip' "$env:TOOLS_DIR\perl.zip"
+          Expand-Archive "$env:TOOLS_DIR\perl.zip" "$env:TOOLS_DIR\strawberry" -Force
+
+          @(
+            "$env:TOOLS_DIR\mingw64\bin",
+            "$env:TOOLS_DIR\cmake\bin",
+            "$env:TOOLS_DIR\ninja",
+            "$env:TOOLS_DIR\strawberry\c\bin",
+            "$env:TOOLS_DIR\strawberry\perl\bin"
+          ) | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+          & gcc --version
+          & cmake --version
+          & ninja --version
+          & perl --version
+
+      - name: Install Android SDK 19.0 / platform 37.0 / build-tools 37.0.0 / NDK r27c
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Get-File([string]$Url, [string]$Out) {
+            curl.exe -L --fail --retry 5 --retry-delay 10 --max-time 1800 -o $Out $Url
+            if ($LASTEXITCODE -ne 0) { throw "下载失败: $Url" }
+          }
+          New-Item -ItemType Directory -Force -Path $env:ANDROID_SDK_ROOT | Out-Null
+
+          $sdkmanager = "$env:ANDROID_SDK_ROOT\cmdline-tools\latest\bin\sdkmanager.bat"
+          if (-not (Test-Path "$env:ANDROID_SDK_ROOT\platforms\$env:SDK_PLATFORM")) {
+            $clt = "$env:TOOLS_DIR\cmdline-tools.zip"
+            Get-File 'https://dl.google.com/android/repository/commandlinetools-win-13114758_latest.zip' $clt
+            Expand-Archive $clt "$env:TOOLS_DIR\clt" -Force
+            New-Item -ItemType Directory -Force -Path "$env:ANDROID_SDK_ROOT\cmdline-tools" | Out-Null
+            Move-Item "$env:TOOLS_DIR\clt\cmdline-tools" "$env:ANDROID_SDK_ROOT\cmdline-tools\latest" -Force
+
+            (1..60 | ForEach-Object { 'y' }) | & $sdkmanager --licenses
+            & $sdkmanager "--sdk_root=$env:ANDROID_SDK_ROOT" "platforms;$env:SDK_PLATFORM" "build-tools;$env:SDK_BUILD_TOOLS" "platform-tools"
+            if ($LASTEXITCODE -ne 0) { throw 'sdkmanager 安装失败' }
+          }
+
+          if (-not (Test-Path "$env:ANDROID_NDK_ROOT\source.properties")) {
+            $ndkZip = "$env:TOOLS_DIR\ndk.zip"
+            Get-File 'https://dl.google.com/android/repository/android-ndk-r27c-windows.zip' $ndkZip
+            New-Item -ItemType Directory -Force -Path 'C:\android\ndk' | Out-Null
+            & $env:SEVEN_ZIP x -y "-oC:\android\ndk" $ndkZip
+            if ($LASTEXITCODE -ne 0) { throw 'NDK 解压失败' }
+          }
+
+          & "$env:ANDROID_NDK_ROOT\toolchains\llvm\prebuilt\windows-x86_64\bin\clang.exe" --version
+          Select-String -Path "$env:ANDROID_NDK_ROOT\source.properties" -Pattern 'Pkg.Revision'
+
+      - name: Fetch Qt sources
+        shell: pwsh
+        run: |
+          & "$env:GITHUB_WORKSPACE\scripts\fetch-qt-source.ps1" `
+            -Version $env:QT_VERSION `
+            -Modules $env:QT_MODULES `
+            -ArchiveDir $env:ARCHIVE_DIR `
+            -SrcRoot $env:SRC_ROOT
+
+      - name: Build host Qt tools (MinGW)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $marker = Join-Path $env:HOST_PREFIX '.cache-ok'
+          if (Test-Path $marker) {
+            Write-Output "host prefix 命中缓存，跳过 host 构建"
+            exit 0
+          }
+          $src = Join-Path $env:SRC_ROOT "qt-everywhere-src-$env:QT_VERSION"
+          Remove-Item $env:HOST_BUILD_DIR -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $env:HOST_BUILD_DIR | Out-Null
+          Push-Location $env:HOST_BUILD_DIR
+          try {
+            & "$src\configure.bat" -prefix $env:HOST_PREFIX -release -opensource -confirm-license `
+              -nomake examples -nomake tests -no-openssl -platform win32-g++
+            if ($LASTEXITCODE -ne 0) { throw "host configure 失败: $LASTEXITCODE" }
+            & cmake --build . --parallel $env:NUMBER_OF_PROCESSORS
+            if ($LASTEXITCODE -ne 0) { throw "host build 失败: $LASTEXITCODE" }
+            & cmake --install .
+            if ($LASTEXITCODE -ne 0) { throw "host install 失败: $LASTEXITCODE" }
+          } finally {
+            Pop-Location
+          }
+          New-Item -ItemType File -Force -Path $marker | Out-Null
+          Remove-Item $env:HOST_BUILD_DIR -Recurse -Force -ErrorAction SilentlyContinue
+
+      - name: Build Android target (arm64-v8a)
+        if: env.HOST_ONLY != 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $src = Join-Path $env:SRC_ROOT "qt-everywhere-src-$env:QT_VERSION"
+          Remove-Item $env:TARGET_BUILD_DIR -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $env:TARGET_BUILD_DIR | Out-Null
+          Push-Location $env:TARGET_BUILD_DIR
+          try {
+            & "$src\configure.bat" -prefix $env:TARGET_PREFIX -release -opensource -confirm-license `
+              -nomake examples -nomake tests -no-openssl `
+              -qt-host-path $env:HOST_PREFIX `
+              -android-abis $env:QT_ABI `
+              -android-sdk $env:ANDROID_SDK_ROOT `
+              -android-ndk $env:ANDROID_NDK_ROOT `
+              -android-javac-source 17 -android-javac-target 17
+            if ($LASTEXITCODE -ne 0) { throw "target configure 失败: $LASTEXITCODE" }
+            & cmake --build . --parallel $env:NUMBER_OF_PROCESSORS
+            if ($LASTEXITCODE -ne 0) { throw "target build 失败: $LASTEXITCODE" }
+            & cmake --install .
+            if ($LASTEXITCODE -ne 0) { throw "target install 失败: $LASTEXITCODE" }
+          } finally {
+            Pop-Location
+          }
+          Remove-Item $env:TARGET_BUILD_DIR -Recurse -Force -ErrorAction SilentlyContinue
+
+      - name: Verify target prefix
+        if: env.HOST_ONLY != 'true'
+        shell: pwsh
+        run: |
+          & python "$env:GITHUB_WORKSPACE\scripts\verify-android-prefix.py" `
+            --prefix "$env:TARGET_PREFIX" `
+            --host-prefix "$env:HOST_PREFIX" `
+            --abi "$env:QT_ABI" `
+            --sdk "$env:ANDROID_SDK_ROOT" `
+            --ndk "$env:ANDROID_NDK_ROOT" `
+            --qt-version "$env:QT_VERSION" `
+            --out "$env:WORK_ROOT\manifest.json"
+
+      - name: Package artifact
+        if: env.HOST_ONLY != 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Get-ChildItem $env:TARGET_PREFIX | Select-Object Name, Length | Format-Table
+          $archive = "$env:WORK_ROOT\qt-$env:QT_VERSION-android-$env:QT_ABI-windows-host.7z"
+          Push-Location $env:WORK_ROOT
+          try {
+            & $env:SEVEN_ZIP a -t7z -mx=9 $archive 'android_arm64_v8a'
+            if ($LASTEXITCODE -ne 0) { throw '7z 打包失败' }
+          } finally {
+            Pop-Location
+          }
+          Get-PSDrive -PSProvider FileSystem |
+            Select-Object Name, @{n='FreeGB'; e={[math]::Round($_.Free / 1GB, 1)}} |
+            Format-Table
+
+      - name: Upload artifact
+        if: env.HOST_ONLY != 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: qt-${{ env.QT_VERSION }}-android-${{ env.QT_ABI }}-windows-host
+          path: |
+            D:\qt\qt-${{ env.QT_VERSION }}-android-${{ env.QT_ABI }}-windows-host.7z
+            D:\qt\manifest.json
+          compression-level: 0
+          retention-days: 14
+
+      - name: Publish release (tag only)
+        if: startsWith(github.ref, 'refs/tags/') && env.HOST_ONLY != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: D:\qt\qt-${{ env.QT_VERSION }}-android-${{ env.QT_ABI }}-windows-host.7z
+
+      - name: Job summary
+        if: always()
+        shell: pwsh
+        run: |
+          $lines = @(
+            "Qt: $env:QT_VERSION",
+            "Modules: $env:QT_MODULES",
+            "ABI: $env:QT_ABI",
+            "NDK: $env:NDK_VERSION",
+            "SDK platform: $env:SDK_PLATFORM",
+            "Build tools: $env:SDK_BUILD_TOOLS",
+            "Host prefix: $env:HOST_PREFIX",
+            "Target prefix: $env:TARGET_PREFIX"
+          )
+          $lines | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8

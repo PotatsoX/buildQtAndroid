@@ -1,0 +1,4 @@
+*.7z
+*.zip
+manifest.json
+__pycache__/
