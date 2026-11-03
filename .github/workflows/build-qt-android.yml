@@ -7,10 +7,10 @@ on:
         description: "Qt 源码版本（默认 6.12.0）"
         required: false
         default: "6.12.0"
-      modules:
-        description: "要构建的 Qt 子模块（空格分隔，必须含 qtbase）"
+      skip_modules:
+        description: "传给 configure -skip 的模块（空格分隔；参考项目默认 qtwebengine，可自行加长）"
         required: false
-        default: "qtbase qtdeclarative qttools qtshadertools"
+        default: "qtwebengine"
       host_only:
         description: "仅构建 host 工具（调试用）"
         required: false
@@ -37,7 +37,7 @@ jobs:
     timeout-minutes: 360
     env:
       QT_VERSION: ${{ inputs.qt_version || '6.12.0' }}
-      QT_MODULES: ${{ inputs.modules || 'qtbase qtdeclarative qttools qtshadertools' }}
+      QT_SKIP_MODULES: ${{ inputs.skip_modules || 'qtwebengine' }}
       HOST_ONLY: ${{ inputs.host_only || 'false' }}
       QT_ABI: arm64-v8a
       WORK_ROOT: D:\qt
@@ -72,11 +72,25 @@ jobs:
           # 删除镜像自带的 Android SDK，本流程使用固定版本的独立安装
           Remove-Item 'C:\Android' -Recurse -Force -ErrorAction SilentlyContinue
 
+      - name: Defender exclusions
+        shell: pwsh
+        run: |
+          # 先解压数万个小文件时，实时扫描是主要耗时；runner 以管理员运行，排除失败不致命
+          try {
+            foreach ($p in @('D:\qt', 'C:\tools', 'C:\android', $env:GITHUB_WORKSPACE)) {
+              Add-MpPreference -ExclusionPath $p -ErrorAction Stop
+            }
+            Write-Output "Defender 已排除: D:\qt, C:\tools, C:\android, $env:GITHUB_WORKSPACE"
+          } catch {
+            Write-Warning "设置 Defender 排除失败，继续执行: $($_.Exception.Message)"
+          }
+
       - name: Compute cache key suffix
         shell: pwsh
         run: |
-          $key = ($env:QT_MODULES -replace '[, ]+', '-').ToLowerInvariant()
-          "MODULE_KEY=$key" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $key = ($env:QT_SKIP_MODULES -replace '[, ]+', '-').ToLowerInvariant()
+          if (-not $key) { $key = 'none' }
+          "SKIP_KEY=$key" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Cache Android SDK / NDK
         uses: actions/cache@v4
@@ -88,13 +102,13 @@ jobs:
         uses: actions/cache@v4
         with:
           path: D:\qt\archives
-          key: qt-src-${{ env.QT_VERSION }}-v1
+          key: qt-src-zip-${{ env.QT_VERSION }}-v1
 
       - name: Cache host Qt prefix
         uses: actions/cache@v4
         with:
           path: D:\qt\host
-          key: qt-host-${{ env.QT_VERSION }}-${{ env.MODULE_KEY }}-mingw${{ env.MINGW_VERSION }}-cmake${{ env.CMAKE_VERSION }}-v1
+          key: qt-host-${{ env.QT_VERSION }}-${{ env.SKIP_KEY }}-mingw${{ env.MINGW_VERSION }}-cmake${{ env.CMAKE_VERSION }}-v1
 
       - name: Setup JDK 21.0.9
         uses: actions/setup-java@v4
@@ -192,11 +206,25 @@ jobs:
       - name: Fetch Qt sources
         shell: pwsh
         run: |
+          # 只保留 zip 源码归档，其他旧归档（如命中旧缓存）占 D: 空间，直接清掉
+          if (Test-Path $env:ARCHIVE_DIR) {
+            Get-ChildItem $env:ARCHIVE_DIR -File | Where-Object { $_.Extension -ne '.zip' } |
+              Remove-Item -Force -ErrorAction SilentlyContinue
+          }
+          $sw = [Diagnostics.Stopwatch]::StartNew()
           & "$env:GITHUB_WORKSPACE\scripts\fetch-qt-source.ps1" `
             -Version $env:QT_VERSION `
-            -Modules $env:QT_MODULES `
             -ArchiveDir $env:ARCHIVE_DIR `
             -SrcRoot $env:SRC_ROOT
+          $sw.Stop()
+          "T_FETCH={0:N1}" -f $sw.Elapsed.TotalSeconds | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Disk space (before build)
+        shell: pwsh
+        run: |
+          Get-PSDrive D, C |
+            Select-Object Name, @{n='FreeGB'; e={[math]::Round($_.Free / 1GB, 1)}} |
+            Format-Table
 
       - name: Build host Qt tools (MinGW)
         shell: pwsh
@@ -211,14 +239,25 @@ jobs:
           Remove-Item $env:HOST_BUILD_DIR -Recurse -Force -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Force -Path $env:HOST_BUILD_DIR | Out-Null
           Push-Location $env:HOST_BUILD_DIR
+          $t = [Diagnostics.Stopwatch]::StartNew()
           try {
+            # 默认参数基线: 参考项目 yuanpeirong/buildQt buildQt6/build-Qt6mingw64.cmd:33
+            $skipArgs = @()
+            foreach ($m in ($env:QT_SKIP_MODULES -split '[\s,]+' | Where-Object { $_ })) { $skipArgs += @('-skip', $m) }
             & "$src\configure.bat" -prefix $env:HOST_PREFIX -release -opensource -confirm-license `
-              -nomake examples -nomake tests -no-openssl -platform win32-g++
+              -nomake examples -nomake tests -no-openssl -platform win32-g++ `
+              -qt-zlib -qt-libpng -qt-libjpeg -qt-freetype -qt-harfbuzz -schannel `
+              @skipArgs
             if ($LASTEXITCODE -ne 0) { throw "host configure 失败: $LASTEXITCODE" }
+            $t.Stop(); "T_HOST_CONFIGURE={0:N1}" -f $t.Elapsed.TotalSeconds | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            $t.Restart()
             & cmake --build . --parallel $env:NUMBER_OF_PROCESSORS
             if ($LASTEXITCODE -ne 0) { throw "host build 失败: $LASTEXITCODE" }
+            $t.Stop(); "T_HOST_BUILD={0:N1}" -f $t.Elapsed.TotalSeconds | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            $t.Restart()
             & cmake --install .
             if ($LASTEXITCODE -ne 0) { throw "host install 失败: $LASTEXITCODE" }
+            $t.Stop(); "T_HOST_INSTALL={0:N1}" -f $t.Elapsed.TotalSeconds | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           } finally {
             Pop-Location
           }
@@ -231,26 +270,43 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $src = Join-Path $env:SRC_ROOT "qt-everywhere-src-$env:QT_VERSION"
+          Write-Output '--- 磁盘(target 前) ---'
+          Get-PSDrive D, C | Select-Object Name, @{n='FreeGB'; e={[math]::Round($_.Free / 1GB, 1)}} | Format-Table
           Remove-Item $env:TARGET_BUILD_DIR -Recurse -Force -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Force -Path $env:TARGET_BUILD_DIR | Out-Null
           Push-Location $env:TARGET_BUILD_DIR
+          $t = [Diagnostics.Stopwatch]::StartNew()
           try {
+            $skipArgs = @()
+            foreach ($m in ($env:QT_SKIP_MODULES -split '[\s,]+' | Where-Object { $_ })) { $skipArgs += @('-skip', $m) }
             & "$src\configure.bat" -prefix $env:TARGET_PREFIX -release -opensource -confirm-license `
               -nomake examples -nomake tests -no-openssl `
               -qt-host-path $env:HOST_PREFIX `
               -android-abis $env:QT_ABI `
               -android-sdk $env:ANDROID_SDK_ROOT `
               -android-ndk $env:ANDROID_NDK_ROOT `
-              -android-javac-source 17 -android-javac-target 17
+              -android-javac-source 17 -android-javac-target 17 `
+              @skipArgs
             if ($LASTEXITCODE -ne 0) { throw "target configure 失败: $LASTEXITCODE" }
+            $t.Stop(); "T_TARGET_CONFIGURE={0:N1}" -f $t.Elapsed.TotalSeconds | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            Write-Output '--- 磁盘(target configure 后) ---'
+            Get-PSDrive D, C | Select-Object Name, @{n='FreeGB'; e={[math]::Round($_.Free / 1GB, 1)}} | Format-Table
+            $t.Restart()
             & cmake --build . --parallel $env:NUMBER_OF_PROCESSORS
             if ($LASTEXITCODE -ne 0) { throw "target build 失败: $LASTEXITCODE" }
+            $t.Stop(); "T_TARGET_BUILD={0:N1}" -f $t.Elapsed.TotalSeconds | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            Write-Output '--- 磁盘(target build 后) ---'
+            Get-PSDrive D, C | Select-Object Name, @{n='FreeGB'; e={[math]::Round($_.Free / 1GB, 1)}} | Format-Table
+            $t.Restart()
             & cmake --install .
             if ($LASTEXITCODE -ne 0) { throw "target install 失败: $LASTEXITCODE" }
+            $t.Stop(); "T_TARGET_INSTALL={0:N1}" -f $t.Elapsed.TotalSeconds | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           } finally {
             Pop-Location
           }
           Remove-Item $env:TARGET_BUILD_DIR -Recurse -Force -ErrorAction SilentlyContinue
+          Write-Output '--- 磁盘(target 后) ---'
+          Get-PSDrive D, C | Select-Object Name, @{n='FreeGB'; e={[math]::Round($_.Free / 1GB, 1)}} | Format-Table
 
       - name: Verify target prefix
         if: env.HOST_ONLY != 'true'
@@ -304,14 +360,28 @@ jobs:
         if: always()
         shell: pwsh
         run: |
+          $fmt = {
+            param($key, $label)
+            $v = [Environment]::GetEnvironmentVariable($key)
+            if ($v) { "{0}: {1:N1} 分钟" -f $label, ([double]$v / 60) } else { "{0}: 未记录" -f $label }
+          }
           $lines = @(
             "Qt: $env:QT_VERSION",
-            "Modules: $env:QT_MODULES",
+            "Modules skipped: $env:QT_SKIP_MODULES",
             "ABI: $env:QT_ABI",
             "NDK: $env:NDK_VERSION",
             "SDK platform: $env:SDK_PLATFORM",
             "Build tools: $env:SDK_BUILD_TOOLS",
             "Host prefix: $env:HOST_PREFIX",
-            "Target prefix: $env:TARGET_PREFIX"
+            "Target prefix: $env:TARGET_PREFIX",
+            "",
+            "## 阶段耗时",
+            (& $fmt 'T_FETCH' '源码下载+解压'),
+            (& $fmt 'T_HOST_CONFIGURE' 'host configure'),
+            (& $fmt 'T_HOST_BUILD' 'host build'),
+            (& $fmt 'T_HOST_INSTALL' 'host install'),
+            (& $fmt 'T_TARGET_CONFIGURE' 'target configure'),
+            (& $fmt 'T_TARGET_BUILD' 'target build'),
+            (& $fmt 'T_TARGET_INSTALL' 'target install')
           )
           $lines | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
