@@ -1,12 +1,12 @@
 # buildQtAndroid
 
-在 **Windows runner** 上从 Qt 源码构建 **Android arm64-v8a** 版 Qt（Windows 主机交叉编译），产物为可直接用于 Qt Android 工程交叉编译的 Qt 前缀。
+在 **Windows runner** 上从 Qt 源码构建 **Android（arm64-v8a / armeabi-v7a）** 版 Qt（Windows 主机交叉编译），产物为可直接用于 Qt Android 工程交叉编译的 Qt 前缀。
 
 > 本仓库只构建 Qt 库/Qt 前缀，不构建、不签名 APK；APK 打包属于使用方的 `androiddeployqt + Gradle` 流程。
 
 ## 结论与定位
 
-- 采用两阶段构建：先构建 **host Qt 工具**（MinGW，提供 `qmake`/`moc`/`rcc`/`qmlimportscanner`/`androiddeployqt`），再用 `-qt-host-path` 交叉编译 **target Qt**（NDK clang，ABI 固定 `arm64-v8a`）。
+- 采用两阶段构建：先构建 **host Qt 工具**（MinGW，提供 `qmake`/`moc`/`rcc`/`qmlimportscanner`/`androiddeployqt`），再用 `-qt-host-path` 交叉编译 **target Qt**（NDK clang，ABI 由输入 `abi` 决定，默认 `arm64-v8a`）。
 - 默认参数基线取自参考项目 [yuanpeirong/buildQt](https://github.com/yuanpeirong/buildQt) 的 `buildQt6/build-Qt6mingw64.cmd:33`：全量解压源码 + `-nomake examples -nomake tests` + `-skip qtwebengine`，构建范围靠 configure 参数控制，不删源码。
 - 标准 GitHub Windows runner 规格为 4 vCPU / 16 GB RAM / 14 GB SSD、单 job 最长 6 小时；缓存总额 10 GB/仓库。以上为 GitHub 文档口径，本工作流会打印实际剩余空间。
 - 参考项目 [PotatsoX/buildQt](https://github.com/PotatsoX/buildQt) 是 **Qt 5.15.19 + MinGW 8.1.0 的桌面构建**，与本项目目标不同；仅借鉴其工作流组织方式（`workflow_dispatch`、7z artifact、tag release）。Android/Qt 6.12 的参数全部来自 Qt 官方资料，不沿用其 Qt 5 配置。
@@ -28,11 +28,11 @@
 | 7-Zip | **24.09** | 仅用于解压/打包 |
 | Python | **3.11.9** | 官方页另一列为 3.8.1，两者均满足 Qt 构建需要 |
 | OpenSSL | 3.5.4 | 本工作流不构建/不链接 Android OpenSSL，见“已知限制” |
-| Perl | 5.42.2.1 | 官方版本页未列出 Perl，沿用参考项目的 Strawberry Perl 便携版 |
+| Perl | 5.42.2.1 | 官方 Software 表列为 strawberry 5.32.0.1；GitHub 上无该版本 portable 资产，沿用参考项目的 5.42.2.1 |
 
 文档冲突说明：`doc.qt.io` 的 *Qt for Android — Building from Source* 页面写的是 MinGW-w64 **13.1**，并明确 **Windows 主机不支持用 MSVC 构建 Qt for Android**。本仓库以 6.12 版本页的 **15.1.0** 为准；“不能用 MSVC”这一点两处一致，因此 host 构建固定 MinGW。
 
-版本页未列 **Gradle** 与 **ABI 列表**，本流程不涉及 Gradle（不出 APK），ABI 固定为 `arm64-v8a`。
+版本页未列 **Gradle** 与 ABI 列表，本流程不涉及 Gradle（不出 APK）；ABI 由输入 `abi` 决定（默认 `arm64-v8a`，官方 CI 对照行用的是 `armeabi-v7a`）。
 
 ## 工作流
 
@@ -50,6 +50,7 @@
 | `qt_version` | `6.12.0` | 源码版本，下载 `qt-everywhere-src-<ver>.zip` |
 | `skip_modules` | `qtwebengine` | 透传给 configure `-skip`，空格分隔；加长即可缩小构建范围（如 `qtwebengine qtpdf qtdoc qttranslations`） |
 | `host_only` | `false` | 只构建 host 工具，便于排错 |
+| `abi` | `arm64-v8a` | 目标 ABI，可选 `arm64-v8a` / `armeabi-v7a`（官方 CI 对照行用 armv7） |
 | `runner` | `windows-2022` | 可换成 larger runner 标签 |
 
 流程步骤：
@@ -58,9 +59,9 @@
 2. 安装固定版本 JDK、Python、MinGW、CMake、Ninja、Perl、7-Zip、Android SDK/NDK。
 3. `scripts/fetch-qt-source.ps1` 下载官方 **zip** 归档（md5 校验取自 `md5sums.txt` 的 zip 行），用 7-Zip 多线程**全量解压**；每 30 秒打印已解出文件数、累计字节数、7z 的 CPU 秒数与工作集。
 4. **host 构建**：`configure.bat ... -platform win32-g++ -nomake examples -nomake tests -skip <skip_modules>`，安装到 `D:\qt\host`，标记 `.cache-ok` 后删除 build 目录。
-5. **target 构建**：`configure.bat ... -qt-host-path D:\qt\host -android-abis arm64-v8a -android-sdk ... -android-ndk ... -skip <skip_modules>`，安装到 `D:\qt\android_arm64_v8a`。
+5. **target 构建**：`configure.bat ... -qt-host-path D:\qt\host -android-abis <abi> -android-sdk ... -android-ndk ... -no-feature-sql-* -skip <skip_modules>`，安装到 `D:\qt\android_<abi>`。
 6. `scripts/verify-android-prefix.py` 校验 ABI/关键库/host 工具，输出 `manifest.json`。
-7. 7z 打包并上传 artifact：`qt-<ver>-android-arm64-v8a-windows-host`。
+7. 7z 打包并上传 artifact：`qt-<ver>-android-<abi>-windows-host`。
 
 磁盘布局：源码、构建目录与安装前缀放在 **D:**（runner 临时盘）；SDK/NDK/工具装在 **C:**，避免挤占 14 GB 的 D: 盘。
 
@@ -112,9 +113,9 @@ Qt 顶层 `configure` **不做自动选择**：源码树里存在哪个模块目
 3. 使用产物：
 
 ```powershell
-# 解压后得到 android_arm64_v8a 前缀
+# 解压后得到 android_<abi> 前缀
 cmake -S <your-app> -B build `
-  -DCMAKE_TOOLCHAIN_FILE="D:\qt\android_arm64_v8a\lib\cmake\Qt6\qt.toolchain.cmake" `
+  -DCMAKE_TOOLCHAIN_FILE="D:\qt\android_<abi>\lib\cmake\Qt6\qt.toolchain.cmake" `
   -DANDROID_NDK_ROOT="C:\android\ndk\android-ndk-r27c" `
   -DANDROID_SDK_ROOT="C:\android\sdk" `
   -DQT_HOST_PATH="D:\qt\host"
@@ -126,13 +127,65 @@ cmake -S <your-app> -B build `
 
 CI 内的自动校验（`scripts/verify-android-prefix.py`）：
 
-- `lib/*.so` 全部为 ELF64、`e_machine=183`（AArch64）；
+- `lib/*.so` 按所选 ABI 校验：`arm64-v8a` 为 ELF64 / `e_machine=183`，`armeabi-v7a` 为 ELF32 / `e_machine=40`；
 - 存在 `libQt6Core*.so` 与 `lib/cmake/Qt6/Qt6Config.cmake`；
 - target 前缀中无 `.exe`/`.dll`（host 工具只应存在于 host 前缀）；
 - host 前缀存在 `qmake*.exe`、`moc.exe`、`androiddeployqt.exe`；
 - 记录 NDK/SDK 实际版本、库清单与 SHA-256 到 `manifest.json`。
 
 本地只做静态校验（YAML 语法、PowerShell/Python 语法）；Qt 编译由 CI 执行。
+
+## 显式关闭的特性（不依赖 runner 预装软件）
+
+GitHub `windows-2022` 镜像预装了大量 SDK。Qt 的 `configure` 对这些 SQL 驱动是 **auto 探测**：找到宿主头文件就编插件。本轮踩坑就是 PostgreSQL：
+
+- 现象：`qtbase/src/plugins/sqldrivers/psql` 的 `QPSQLDriverPlugin_resource.rc` 编译时，MinGW `windres` 传给 `cc1.exe` 的 `-I "C:/Program Files/PostgreSQL/14/include"` 没有引号保护，被空格拆开 → `cc1.exe: fatal error: Files/PostgreSQL/14/include: No such file or directory`，host 构建在 11763/13980 处失败。
+- 根因：不是工具链问题，而是“本可关闭、却被宿主环境自动打开”的插件；runner 预装的 PostgreSQL 版本还会漂移（版本页 Software 表写 9.6.16-1，实际命中 `PostgreSQL/14`）。
+- 处理：host 与 target 的 `configure` 都显式 `-no-feature-sql-*`，只保留 Qt 自带 bundled 的 `sql-sqlite`。
+
+特征名取自源码 `qtbase/src/plugins/sqldrivers/configure.cmake`（`sql-db2`、`sql-ibase`、`sql-mysql`、`sql-oci`、`sql-odbc`、`sql-psql`、`sql-sqlite`、`sql-mimer`），写法沿用官方 CI 行的 `-no-feature-<name>` 形式（官方行里即 `-no-feature-pkg-config`）。
+
+| 开关 | 阶段 | 理由 |
+|---|---|---|
+| `-no-feature-sql-psql` | host + target | 命中 runner 预装 PostgreSQL；windres 空格路径直接失败 |
+| `-no-feature-sql-mysql` | host + target | runner 预装 MySQL（版本页 Software 表 `MySQL 8.0.36`），同类风险 |
+| `-no-feature-sql-odbc` | host + target | 依赖 Windows ODBC 头文件/库，属宿主环境 |
+| `-no-feature-sql-oci` | host + target | 源码明确提示 Qt 不支持用 MinGW 编译 Oracle 驱动 |
+| `-no-feature-sql-db2` / `-no-feature-sql-ibase` / `-no-feature-sql-mimer` | host + target | 同属外部商业库探测，一并关掉，避免版本漂移 |
+| `-no-feature-cups` | host + target | 依赖 `Cups_FOUND`（`src/printsupport/configure.cmake`），宿主装了 CUPS 就会开 |
+| `-no-feature-pkg-config` | target | 官方 CI 行原样；避免 pkg-config 把宿主库当成交叉编译依赖 |
+| `-no-openssl` | host + target | 不引入宿主 OpenSSL |
+| `-qt-zlib` / `-qt-libpng` / `-qt-libjpeg` / `-qt-freetype` / `-qt-harfbuzz` | host | 强制用 Qt 自带副本 |
+| `-schannel` | host | Windows TLS 后端 |
+
+评估后**不**显式关闭的项：
+
+- `fontconfig`：`CONDITION NOT APPLE AND NOT WIN32 AND ...`（`src/gui/configure.cmake`），Windows 上不可能命中。
+- `vulkan`：`CONDITION QT_FEATURE_library AND QT_FEATURE_vkgen AND WrapVulkanHeaders_FOUND`，runner 未装 Vulkan SDK 时自动关闭；如需彻底固定可加 `-no-feature-vulkan`（本工作流未加）。
+- `zstd`：`qt_feature("zstd" ... CONDITION WrapZSTD_FOUND)`，Qt 用自带 3rdparty 副本，不依赖宿主。
+- `icu`：Windows 下需显式 `-icu` 才启用，默认不探测（**未逐行核实**）。
+- `sql-sqlite`：Qt 自带 bundled sqlite，保留。
+
+## 与官方 CI 行对齐（`android-armv7-on-windows`）
+
+官方 CI 行的列是 `ID / Dependencies / Target / Host / Coin Options / Configure Arguments / Environment Variables`，工具版本要到 Software 表的 **Windows 11 24H2 x86_64** 列去核对。
+
+| 工具 | 官方 CI（Windows 11 24H2 x86_64 列） | 本工作流 | 处理 |
+|---|---|---|---|
+| NDK / SDK platform / build-tools / cmdline-tools | r27c / android-37.0 / 37.0.0 / 19.0 | 同 | 一致 |
+| CMake / Ninja / JDK / MinGW / 7-Zip / OpenSSL | 4.3.2 / 1.10.2 / 21.0.9 / 15.1.0(posix-seh-msvcrt-rt_v12) / 24.09 / 3.5.4 | 同 | 一致 |
+| Python | 3.8.1 | 3.11.9 | 保留：3.8.1 已 EOL，且 setup-python 清单里仅旧补丁版本；Qt 构建脚本两者兼容 |
+| Perl (strawberry) | 5.32.0.1 | 5.42.2.1 | 保留：GitHub 上没有 5.32.0.1 的 portable 资产（实测未找到） |
+| 平台镜像 | `windows-11_24h2-mingw15` | `windows-2022` | 差异：标准 runner 无该自定义镜像；MinGW 版本已对齐 15.1.0 |
+| ABI | `armeabi-v7a` | 输入 `abi`，默认 `arm64-v8a` | 可切换 |
+| 其他 configure 参数 | `-release -force-debug-info -qpa android;offscreen -nomake examples -no-feature-pkg-config` | `-release -nomake examples -nomake tests -no-feature-pkg-config` | 已纳入 pkg-config；`-force-debug-info`、`-qpa android;offscreen` 未加（未核实其对产物大小的影响） |
+
+armv7 额外注意：
+
+- 交叉 triple 为 `armv7a-linux-androideabi`，由 `-android-abis armeabi-v7a` 自动选择；产物 `.so` 是 ELF32、`e_machine=40`，`verify-android-prefix.py` 已按 ABI 校验 ELF class 与 machine。
+- 资源编译（`windres`/`.rc`）只发生在 **host**（x64 MinGW），与 target ABI 无关，armv7 不涉及 32 位 windres。
+- 每种 ABI 是独立构建：`TARGET_PREFIX` 按 ABI 命名（`D:\qt\android_<abi>`），artifact 名也带 ABI；host 前缀与 ABI 无关，缓存 key 不含 ABI。
+- minSdk 下限由 Qt 版本决定（具体数值**未核实**）；armv7 只对 32 位旧设备有意义，Google Play 自 2019 年起要求 64 位。
 
 ## 故障排查
 
@@ -155,7 +208,7 @@ CI 内的自动校验（`scripts/verify-android-prefix.py`）：
 
 - **未在本机编译验证**：Qt 6.12 + MinGW 15.1.0 + CMake 4.3.2 的组合以官方版本页为准，是否存在 6.12 特有的配置项差异，需以首轮 CI 结果确认。
 - `-no-openssl`：用于避免引入 Android OpenSSL 预编译依赖，代价是 QtNetwork 无 TLS。若需要 HTTPS，应另行构建 OpenSSL 3.5.4 for Android 并改为 `-openssl-linked`。
-- 官方版本页未列 Perl 版本；使用参考项目的 Strawberry Perl 5.42.2.1 便携版。
+- 官方版本页（Software 表）列了 Strawberry Perl 5.32.0.1，但 GitHub 上没有该版本便携资产，故用 5.42.2.1。
 - `actions/setup-java` 是否可精确拉到 Temurin `21.0.9` 未在本地核实；失败时会回退到同主版本（需改 workflow）。
 - 标准 runner 的实际可用磁盘可能因镜像不同而波动；工作流只打印、不强制清理系统目录。
 - 全模块构建（仅跳 `qtwebengine`）在 4 vCPU / 14 GB 盘上很可能超时或超盘；需 larger runner（如 `windows-latest-8-cores`）或加长 `skip_modules`。

@@ -12,17 +12,21 @@ EM_386 = 3
 EM_X86_64 = 62
 EM_ARM = 40
 
+# ABI -> (ELF class, e_machine)
+EXPECTED_ELF = {
+    "arm64-v8a": (2, AARCH64),
+    "armeabi-v7a": (1, EM_ARM),
+}
 
-def elf_machine(path: Path):
+
+def elf_header(path: Path):
     try:
         header = path.open("rb").read(20)
     except OSError:
-        return None
+        return None, None
     if len(header) < 20 or header[:4] != b"\x7fELF":
-        return None
-    if header[4] != 2:  # 64 位
-        return None
-    return struct.unpack("<H", header[18:20])[0]
+        return None, None
+    return header[4], struct.unpack("<H", header[18:20])[0]
 
 
 def is_pe(path: Path):
@@ -66,6 +70,7 @@ def main():
 
     prefix = Path(args.prefix)
     host = Path(args.host_prefix)
+    expected_class, expected_machine = EXPECTED_ELF.get(args.abi, (2, AARCH64))
     errors = []
     warnings = []
 
@@ -77,11 +82,11 @@ def main():
         errors.append("未找到 lib/*.so")
     bad = []
     for so in so_files:
-        machine = elf_machine(so)
-        if machine != AARCH64:
-            bad.append(f"{so.name}: e_machine={machine}")
+        elf_class, machine = elf_header(so)
+        if (elf_class, machine) != (expected_class, expected_machine):
+            bad.append(f"{so.name}: class={elf_class} e_machine={machine}")
     if bad:
-        errors.append("存在非 arm64 ELF: " + ", ".join(bad[:5]))
+        errors.append(f"存在非 {args.abi} ELF: " + ", ".join(bad[:5]))
 
     core = [p for p in so_files if p.name.startswith("libQt6Core") and p.name.endswith(".so")]
     if not core:
@@ -138,7 +143,7 @@ def main():
             "name": so.name,
             "size": so.stat().st_size,
             "sha256": sha256(so),
-            "e_machine": elf_machine(so),
+            "e_machine": elf_header(so)[1],
         })
 
     manifest = {
@@ -162,7 +167,7 @@ def main():
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    print(f"ELF 检查: {len(so_files)} 个 .so，arm64 异常 {len(bad)} 个")
+    print(f"ELF 检查: {len(so_files)} 个 .so，{args.abi} 异常 {len(bad)} 个")
     print(f"关键库: {', '.join(p.name for p in core)}")
     print(f"host 工具: {json.dumps(host_tools, ensure_ascii=False)}")
     print(f"target 中 Windows PE 文件: {len(pe_files)}")

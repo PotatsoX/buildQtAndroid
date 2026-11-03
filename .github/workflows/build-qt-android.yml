@@ -11,6 +11,14 @@ on:
         description: "传给 configure -skip 的模块（空格分隔；参考项目默认 qtwebengine，可自行加长）"
         required: false
         default: "qtwebengine"
+      abi:
+        description: "目标 ABI（官方 CI 对照行用 armeabi-v7a）"
+        required: false
+        type: choice
+        default: "arm64-v8a"
+        options:
+          - arm64-v8a
+          - armeabi-v7a
       host_only:
         description: "仅构建 host 工具（调试用）"
         required: false
@@ -39,14 +47,14 @@ jobs:
       QT_VERSION: ${{ inputs.qt_version || '6.12.0' }}
       QT_SKIP_MODULES: ${{ inputs.skip_modules || 'qtwebengine' }}
       HOST_ONLY: ${{ inputs.host_only || 'false' }}
-      QT_ABI: arm64-v8a
+      QT_ABI: ${{ inputs.abi || 'arm64-v8a' }}
       WORK_ROOT: D:\qt
       SRC_ROOT: D:\qt\src
       ARCHIVE_DIR: D:\qt\archives
       HOST_BUILD_DIR: D:\qt\host-build
       HOST_PREFIX: D:\qt\host
       TARGET_BUILD_DIR: D:\qt\target-build
-      TARGET_PREFIX: D:\qt\android_arm64_v8a
+      TARGET_PREFIX: D:\qt\android_${{ inputs.abi || 'arm64-v8a' }}
       TOOLS_DIR: C:\tools
       ANDROID_SDK_ROOT: C:\android\sdk
       ANDROID_NDK_ROOT: C:\android\ndk\android-ndk-r27c
@@ -247,6 +255,8 @@ jobs:
             & "$src\configure.bat" -prefix $env:HOST_PREFIX -release -opensource -confirm-license `
               -nomake examples -nomake tests -no-openssl -platform win32-g++ `
               -qt-zlib -qt-libpng -qt-libjpeg -qt-freetype -qt-harfbuzz -schannel `
+              -no-feature-sql-psql -no-feature-sql-mysql -no-feature-sql-odbc -no-feature-sql-oci `
+              -no-feature-sql-db2 -no-feature-sql-ibase -no-feature-sql-mimer -no-feature-cups `
               @skipArgs
             if ($LASTEXITCODE -ne 0) { throw "host configure 失败: $LASTEXITCODE" }
             $t.Stop(); "T_HOST_CONFIGURE={0:N1}" -f $t.Elapsed.TotalSeconds | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
@@ -264,7 +274,7 @@ jobs:
           New-Item -ItemType File -Force -Path $marker | Out-Null
           Remove-Item $env:HOST_BUILD_DIR -Recurse -Force -ErrorAction SilentlyContinue
 
-      - name: Build Android target (arm64-v8a)
+      - name: Build Android target
         if: env.HOST_ONLY != 'true'
         shell: pwsh
         run: |
@@ -286,6 +296,9 @@ jobs:
               -android-sdk $env:ANDROID_SDK_ROOT `
               -android-ndk $env:ANDROID_NDK_ROOT `
               -android-javac-source 17 -android-javac-target 17 `
+              -no-feature-sql-psql -no-feature-sql-mysql -no-feature-sql-odbc -no-feature-sql-oci `
+              -no-feature-sql-db2 -no-feature-sql-ibase -no-feature-sql-mimer `
+              -no-feature-cups -no-feature-pkg-config `
               @skipArgs
             if ($LASTEXITCODE -ne 0) { throw "target configure 失败: $LASTEXITCODE" }
             $t.Stop(); "T_TARGET_CONFIGURE={0:N1}" -f $t.Elapsed.TotalSeconds | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
@@ -330,7 +343,7 @@ jobs:
           $archive = "$env:WORK_ROOT\qt-$env:QT_VERSION-android-$env:QT_ABI-windows-host.7z"
           Push-Location $env:WORK_ROOT
           try {
-            & $env:SEVEN_ZIP a -t7z -mx=9 $archive 'android_arm64_v8a'
+            & $env:SEVEN_ZIP a -t7z -mx=9 $archive (Split-Path $env:TARGET_PREFIX -Leaf)
             if ($LASTEXITCODE -ne 0) { throw '7z 打包失败' }
           } finally {
             Pop-Location
