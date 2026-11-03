@@ -188,6 +188,28 @@ armv7 额外注意：
 - 每种 ABI 是独立构建：`TARGET_PREFIX` 按 ABI 命名（`D:\qt\android_<abi>`），artifact 名也带 ABI；host 前缀与 ABI 无关，缓存 key 不含 ABI。
 - minSdk 下限由 Qt 版本决定（具体数值**未核实**）；armv7 只对 32 位旧设备有意义，Google Play 自 2019 年起要求 64 位。
 
+## 与 Fs-scripts 的对照
+
+参考对象 `Fsu0413/Fs-scripts` @ `d22229c`（最后提交 2024-09-30）。它有 Android 配置，但**没有独立的 Android 构建脚本**：配置全在 `Compile/lib/qtCompile/conf.lua` 的 Lua 表里，由 Jenkins 环境变量驱动，仓库 35 个文件中 `java`/`jar`/`gradle` 出现 **0 次**（忽略大小写核对过）。
+
+| 维度 | Fs-scripts | 本仓库 | 判断 |
+|---|---|---|---|
+| Qt 版本上限 | 6.7.2（另有 6.2.9/6.5.3/5.15.14） | 6.12.0 | 它早于 Qt 的 Gradle 化 jar，**Gradle 这块没有可抄的东西** |
+| 工具链来源 | 本机固定路径 `D:\android-sdk-windows-20240205`、`D:\android-ndk-r26d`、OpenJDK **11**、CMake 3.29（`Configuration.lua` L52-79、L392-395） | runner 上 `sdkmanager`/7z 安装，版本钉死 | 它更好（预置即用）；不适配 hosted runner |
+| host Qt | 下载 Jenkins 产出的静态 host Qt（`hostToolsUrlwin` L7276），该包用 `-DFEATURE_relocatable=ON` 构建（L6289 段） | 首次自建 host 前缀 + Actions 缓存 | 等价；缓存已覆盖重复构建成本 |
+| target 参数 | 直调 CMake：`-DQT_HOST_PATH`、`-DANDROID_ABI=arm64-v8a`、`-DANDROID_PLATFORM=27`、`-DBUILD_qtwebengine=OFF`、`-DFEATURE_icu=OFF`、`-DFEATURE_ssl=ON` + 自建 OpenSSL、`-DMYSQL_INCDIR` 自建 MariaDB | `configure.bat` + `-android-abis` + `-no-feature-sql-*` | 它用"自建依赖"消解宿主机探测，成本更高；我们直接关特性 |
+| Gradle / android jar | 无任何处理（0 处 java/jar/gradle） | 预灌 `~/.gradle` + Actions 缓存 | 它的空白正是我们卡住的点，无法照抄 |
+| 缓存 | 无 Actions 缓存，靠 Jenkins workspace 持久化 | 4 类 Actions 缓存 | 本仓库更好（CI 场景） |
+| 构建期外网依赖 | 内网 Jenkins artifact + 内网源码包 | 仅 GitHub 可达网络 | 环境不同，不构成优劣 |
+
+不采纳的三点及理由：
+
+1. **直调 CMake 取代 `configure.bat`**：Qt 6.12 的 Gradle 校验在 CMake 层，直调一样会触发；还会丢掉 configure 对特性的推导和 `-no-feature-*` 解析。
+2. **自建 OpenSSL/MariaDB 再 `-DMYSQL_INCDIR`**：收益只是多一个 sql 驱动，代价是多两个第三方库的交叉编译。
+3. **把 host 工具复制进 target 前缀（其 `qt6_deploy_host.sh` 做法）**：它靠正则改写 `Qt6Dependencies.cmake`/`qt.toolchain.cmake` 里的 `HostPrefix`，只对 ≤6.7 验证过；Qt 6.12 的 `Qt6Dependencies.cmake.in` 已无 `__qt_platform_initial_qt_host_path`（本仓库核对，0 命中），照抄不成立。要用需实测，暂记为可选事项。
+
+一处可借鉴但未落地的细节：它对 Android 显式传 `-DCMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH=ON`。该变量默认即为 ON，显式写只是自证，不会改变宿主机探测行为，因此不改。
+
 ## 为什么 target configure 需要 Gradle 离线缓存 / 我们的处理方式
 
 Qt 6.12 里 Android 的 `Qt6Android.jar` 由源码树内的 Gradle 工程构建（`qtbase/src/android/jar`）。Qt 的 CMake 在 **configure 阶段**就检查这些依赖是否已在本地，未缓存会直接 `FATAL_ERROR`（源码 `qtbase/cmake/QtJavaHelpers.cmake:65-66`、`:236-291`），因此失败发生在 target configure，而不是构建期。

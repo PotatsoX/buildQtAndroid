@@ -396,6 +396,10 @@ jobs:
       - name: Verify target prefix
         if: env.HOST_ONLY != 'true'
         shell: pwsh
+        env:
+          # Windows runner 的默认 cp1252 会让中文输出抛 UnicodeEncodeError
+          PYTHONIOENCODING: utf-8
+          PYTHONUTF8: 1
         run: |
           & python "$env:GITHUB_WORKSPACE\scripts\verify-android-prefix.py" `
             --prefix "$env:TARGET_PREFIX" `

@@ -2,6 +2,7 @@
 """校验 Qt for Android 交叉编译前缀，并输出 manifest。"""
 import argparse
 import hashlib
+import io
 import json
 import struct
 import sys
@@ -57,11 +58,44 @@ def sha256(path: Path):
     return digest.hexdigest()
 
 
+def _ensure_utf8_stdio():
+    """把 stdout/stderr 切到 UTF-8，兼容流不可重配（无 reconfigure/无 buffer）的情况。"""
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        if stream is None:
+            continue
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+                continue
+            except (ValueError, OSError):
+                pass
+        buffer = getattr(stream, "buffer", None)
+        if buffer is not None:
+            try:
+                setattr(sys, name, io.TextIOWrapper(buffer, encoding="utf-8", errors="replace"))
+            except (ValueError, OSError):
+                pass
+
+
+def _emit(text, err=False):
+    """输出一行；流仍无法编码时退化为 ASCII 替换，避免 UnicodeEncodeError 中断校验。"""
+    stream = sys.stderr if err else sys.stdout
+    try:
+        print(text, file=stream)
+    except UnicodeEncodeError:
+        print(text.encode("ascii", "replace").decode("ascii"), file=stream)
+
+
 def main():
-    parser = argparse.ArgumentParser()
+    _ensure_utf8_stdio()
+    parser = argparse.ArgumentParser(
+        description="Verify a cross-compiled Qt for Android prefix and write a manifest."
+    )
     parser.add_argument("--prefix", required=True)
     parser.add_argument("--host-prefix", required=True)
-    parser.add_argument("--abi", default="arm64-v8a")
+    parser.add_argument("--abi", default="arm64-v8a", choices=sorted(EXPECTED_ELF))
     parser.add_argument("--sdk", required=True)
     parser.add_argument("--ndk", required=True)
     parser.add_argument("--qt-version", required=True)
@@ -70,7 +104,7 @@ def main():
 
     prefix = Path(args.prefix)
     host = Path(args.host_prefix)
-    expected_class, expected_machine = EXPECTED_ELF.get(args.abi, (2, AARCH64))
+    expected_class, expected_machine = EXPECTED_ELF[args.abi]
     errors = []
     warnings = []
 
@@ -167,15 +201,15 @@ def main():
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    print(f"ELF 检查: {len(so_files)} 个 .so，{args.abi} 异常 {len(bad)} 个")
-    print(f"关键库: {', '.join(p.name for p in core)}")
-    print(f"host 工具: {json.dumps(host_tools, ensure_ascii=False)}")
-    print(f"target 中 Windows PE 文件: {len(pe_files)}")
+    _emit(f"ELF check: {len(so_files)} .so files, {args.abi} mismatched {len(bad)}")
+    _emit(f"Core libs: {', '.join(p.name for p in core)}")
+    _emit(f"Host tools: {json.dumps(host_tools, ensure_ascii=False)}")
+    _emit(f"Windows PE files in target prefix: {len(pe_files)}")
     for message in warnings:
-        print(f"WARN: {message}")
+        _emit(f"WARN: {message}")
     for message in errors:
-        print(f"ERROR: {message}", file=sys.stderr)
-    print(f"manifest: {out}")
+        _emit(f"ERROR: {message}", err=True)
+    _emit(f"manifest: {out}")
     return 1 if errors else 0
 
 
