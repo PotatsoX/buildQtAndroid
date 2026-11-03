@@ -274,6 +274,78 @@ jobs:
           New-Item -ItemType File -Force -Path $marker | Out-Null
           Remove-Item $env:HOST_BUILD_DIR -Recurse -Force -ErrorAction SilentlyContinue
 
+      - name: Cache Gradle home
+        if: env.HOST_ONLY != 'true'
+        uses: actions/cache@v4
+        with:
+          # Qt 构建期 Gradle 的缓存（wrapper 分发包 + Maven 依赖）
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-qt${{ env.QT_VERSION }}-bt${{ env.SDK_BUILD_TOOLS }}-v1
+          restore-keys: |
+            gradle-qt${{ env.QT_VERSION }}-bt${{ env.SDK_BUILD_TOOLS }}-
+
+      - name: Prepare Gradle offline cache
+        if: env.HOST_ONLY != 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Qt 6.12 的 Android JAR 由 Gradle 构建，target configure 会做离线缓存校验，
+          # 未命中直接 FATAL_ERROR（qtbase/cmake/QtJavaHelpers.cmake:278-289）
+          $src = Join-Path $env:SRC_ROOT "qt-everywhere-src-$env:QT_VERSION"
+          $qtbase = Join-Path $src 'qtbase'
+          $jarProject = Join-Path $qtbase 'src\android\jar'
+          $setupScript = Join-Path $qtbase 'cmake\QtSetupAndroid.cmake'
+          $gradlew = Join-Path $qtbase 'src\3rdparty\gradle\gradlew.bat'
+          $wrapperJar = Join-Path $qtbase 'src\3rdparty\gradle\gradle\wrapper\gradle-wrapper.jar'
+          foreach ($p in @($jarProject, $setupScript, $gradlew, $wrapperJar)) {
+            if (-not (Test-Path $p)) { throw "Gradle 前置文件缺失: $p" }
+          }
+
+          # 参数与 QtJavaHelpers.cmake:253-263 传给校验脚本的保持一致（含 build variant/build-tools）
+          $common = @(
+            '-DACTION_RESOLVE_GRADLE=ON',
+            "-DQT_ROOT_DIR=$qtbase",
+            "-DGRADLE_PROJECT_DIR=$jarProject",
+            '-DGRADLE_BUILD_VARIANT=Release',
+            "-DQT_ANDROID_SDK_BUILD_TOOLS_REVISION=$env:SDK_BUILD_TOOLS"
+          )
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+
+          # 1) 先按 Qt 的离线口径校验，命中则无需联网
+          & cmake -E env "ANDROID_SDK_ROOT=$env:ANDROID_SDK_ROOT" cmake @common `
+            '-DONLY_VERIFY_GRADLE_CACHE=ON' -P "$setupScript" 2>&1 | Tee-Object -Variable verifyOut
+          if ($LASTEXITCODE -eq 0) {
+            Write-Output '--- Gradle 离线缓存已命中，跳过联网解析 ---'
+          } else {
+            # 2) 未命中：按 Qt 报错里给出的命令联网填充缓存（wrapper 会自行下载 Gradle 分发包）
+            Write-Output '--- Gradle 离线缓存未命中，开始联网解析依赖 ---'
+            & cmake -E env "ANDROID_SDK_ROOT=$env:ANDROID_SDK_ROOT" cmake @common -P "$setupScript" 2>&1 |
+              Tee-Object -Variable resolveOut
+            if ($LASTEXITCODE -ne 0) {
+              Write-Output '--- Gradle 解析失败诊断 ---'
+              Get-Content (Join-Path $qtbase 'src\3rdparty\gradle\gradle\wrapper\gradle-wrapper.properties')
+              & cmd /c "$gradlew" --version 2>&1 | Select-Object -Last 20
+              $gh = Join-Path $env:USERPROFILE '.gradle'
+              if (Test-Path $gh) {
+                Get-ChildItem $gh -Recurse -File -ErrorAction SilentlyContinue |
+                  Measure-Object Length -Sum |
+                  Select-Object Count, @{n = 'MB'; e = { [math]::Round($_.Sum / 1MB, 1) } }
+              }
+              throw 'Gradle 离线缓存填充失败，见上方 Gradle 输出'
+            }
+          }
+
+          $gh = Join-Path $env:USERPROFILE '.gradle'
+          if (Test-Path $gh) {
+            $sum = (Get-ChildItem $gh -Recurse -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
+            "Gradle 缓存体积: {0:N1} MB ({1})" -f ($sum / 1MB), $gh
+            Get-ChildItem (Join-Path $gh 'wrapper\dists') -Directory -ErrorAction SilentlyContinue | Select-Object Name
+          }
+          $sw.Stop()
+          "T_GRADLE_PREP={0:N1}" -f $sw.Elapsed.TotalSeconds | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Build Android target
         if: env.HOST_ONLY != 'true'
         shell: pwsh
@@ -393,6 +465,7 @@ jobs:
             (& $fmt 'T_HOST_CONFIGURE' 'host configure'),
             (& $fmt 'T_HOST_BUILD' 'host build'),
             (& $fmt 'T_HOST_INSTALL' 'host install'),
+            (& $fmt 'T_GRADLE_PREP' 'Gradle 缓存准备'),
             (& $fmt 'T_TARGET_CONFIGURE' 'target configure'),
             (& $fmt 'T_TARGET_BUILD' 'target build'),
             (& $fmt 'T_TARGET_INSTALL' 'target install')

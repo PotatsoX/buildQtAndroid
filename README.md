@@ -32,7 +32,7 @@
 
 文档冲突说明：`doc.qt.io` 的 *Qt for Android — Building from Source* 页面写的是 MinGW-w64 **13.1**，并明确 **Windows 主机不支持用 MSVC 构建 Qt for Android**。本仓库以 6.12 版本页的 **15.1.0** 为准；“不能用 MSVC”这一点两处一致，因此 host 构建固定 MinGW。
 
-版本页未列 **Gradle** 与 ABI 列表，本流程不涉及 Gradle（不出 APK）；ABI 由输入 `abi` 决定（默认 `arm64-v8a`，官方 CI 对照行用的是 `armeabi-v7a`）。
+版本页未列 **Gradle** 与 ABI 列表；但 Qt 6.12 的 Android JAR 由 Gradle 构建，Qt 自身构建期就需要 Gradle（源码树内 wrapper 指定 Gradle **9.5.1**），详见「为什么 target configure 需要 Gradle 离线缓存」。ABI 由输入 `abi` 决定（默认 `arm64-v8a`，官方 CI 对照行用的是 `armeabi-v7a`）。
 
 ## 工作流
 
@@ -55,13 +55,14 @@
 
 流程步骤：
 
-1. 恢复缓存（源码归档 / host 前缀 / Android SDK+NDK）。
+1. 恢复缓存（源码归档 / host 前缀 / Android SDK+NDK / Gradle home）。
 2. 安装固定版本 JDK、Python、MinGW、CMake、Ninja、Perl、7-Zip、Android SDK/NDK。
 3. `scripts/fetch-qt-source.ps1` 下载官方 **zip** 归档（md5 校验取自 `md5sums.txt` 的 zip 行），用 7-Zip 多线程**全量解压**；每 30 秒打印已解出文件数、累计字节数、7z 的 CPU 秒数与工作集。
 4. **host 构建**：`configure.bat ... -platform win32-g++ -nomake examples -nomake tests -skip <skip_modules>`，安装到 `D:\qt\host`，标记 `.cache-ok` 后删除 build 目录。
-5. **target 构建**：`configure.bat ... -qt-host-path D:\qt\host -android-abis <abi> -android-sdk ... -android-ndk ... -no-feature-sql-* -skip <skip_modules>`，安装到 `D:\qt\android_<abi>`。
-6. `scripts/verify-android-prefix.py` 校验 ABI/关键库/host 工具，输出 `manifest.json`。
-7. 7z 打包并上传 artifact：`qt-<ver>-android-<abi>-windows-host`。
+5. **Gradle 离线缓存准备**：按 `qtbase/cmake/QtJavaHelpers.cmake` 报错给出的命令调用 `cmake\QtSetupAndroid.cmake`，先把 `Qt6Android` JAR 的 Gradle 依赖填进 `~/.gradle`（已命中则跳过联网）。
+6. **target 构建**：`configure.bat ... -qt-host-path D:\qt\host -android-abis <abi> -android-sdk ... -android-ndk ... -no-feature-sql-* -skip <skip_modules>`，安装到 `D:\qt\android_<abi>`。
+7. `scripts/verify-android-prefix.py` 校验 ABI/关键库/host 工具，输出 `manifest.json`。
+8. 7z 打包并上传 artifact：`qt-<ver>-android-<abi>-windows-host`。
 
 磁盘布局：源码、构建目录与安装前缀放在 **D:**（runner 临时盘）；SDK/NDK/工具装在 **C:**，避免挤占 14 GB 的 D: 盘。
 
@@ -103,7 +104,7 @@ Qt 顶层 `configure` **不做自动选择**：源码树里存在哪个模块目
 - 时间：4 vCPU 下全模块（仅跳 `qtwebengine`）的 host + target 很可能超过 6 小时。可选办法：换 larger runner，或把 `skip_modules` 加长（只改运行参数，无需改代码）。
 - 解压开销构成：每文件一次的实时写入 + 扫描是主因，压缩流解码只占几十秒。工作流因此在装工具前加了 Defender 路径排除（`D:\qt`、`C:\tools`、`C:\android`、workspace），失败不致命。
 - 源码归档改用官方 **zip**：实测 604,643,023 字节（旧方案压缩包为 443,394,020 字节，大 36%），但 271 MB/s 下下载只差约 1 秒；换来的是 7-Zip 多线程解压、不必先把整段压缩流解成中转文件，解压路径更短也更少一类失败点。md5 取自官方 `md5sums.txt` 的 zip 行（`64889aee0623311cce096be5f445c7d1`）。
-- 缓存策略：源码归档（约 605 MB）、host 前缀（约 1–2 GB）、Android SDK/NDK（约 3 GB）；均带版本号 key，避免脏命中。target 构建目录不入缓存（体积大且多数场景下缓存收益低），因此仓库缓存总量控制在 10 GB 限额内。
+- 缓存策略：源码归档（约 605 MB）、host 前缀（约 1–2 GB）、Android SDK/NDK（约 3 GB）、Gradle home（体积未实测，推断 1–2 GB）；均带版本号 key，避免脏命中。target 构建目录不入缓存（体积大且多数场景下缓存收益低），因此仓库缓存总量控制在 10 GB 限额内。
 - ccache/sccache 未启用：Windows + MinGW 下收益与稳定性未验证，host 前缀缓存已覆盖重复构建的主要成本。
 
 ## 使用方法
@@ -187,6 +188,23 @@ armv7 额外注意：
 - 每种 ABI 是独立构建：`TARGET_PREFIX` 按 ABI 命名（`D:\qt\android_<abi>`），artifact 名也带 ABI；host 前缀与 ABI 无关，缓存 key 不含 ABI。
 - minSdk 下限由 Qt 版本决定（具体数值**未核实**）；armv7 只对 32 位旧设备有意义，Google Play 自 2019 年起要求 64 位。
 
+## 为什么 target configure 需要 Gradle 离线缓存 / 我们的处理方式
+
+Qt 6.12 里 Android 的 `Qt6Android.jar` 由源码树内的 Gradle 工程构建（`qtbase/src/android/jar`）。Qt 的 CMake 在 **configure 阶段**就检查这些依赖是否已在本地，未缓存会直接 `FATAL_ERROR`（源码 `qtbase/cmake/QtJavaHelpers.cmake:65-66`、`:236-291`），因此失败发生在 target configure，而不是构建期。
+
+- 检查对象：Gradle 用户目录（默认 `~/.gradle`）里是否有该 JAR 工程所需依赖；它调用 `cmake/QtSetupAndroid.cmake` 跑一次 `resolveDependencies` 并带 `--offline`（`:66-68`）。
+- 判定路径：先要求 `$ANDROID_SDK_ROOT/build-tools/<rev>` 存在（`QtJavaHelpers.cmake:259-262`），再以 `ANDROID_SDK_ROOT` 为环境变量执行校验；退出码非 0 即失败。
+- 缓存来源：wrapper 在 `qtbase/src/3rdparty/gradle/`，`gradle-wrapper.properties` 指定 `gradle-9.5.1-bin.zip`；依赖仓库是 `google()`、`mavenCentral()`、`gradlePluginPortal()`（`src/android/jar/settings.gradle`），AGP 版本 `9.2.1`（`src/android/jar/gradle/libs.versions.toml`）。
+
+本工作流的处理（`Prepare Gradle offline cache` 步骤）：
+
+1. 先用 `-DONLY_VERIFY_GRADLE_CACHE=ON` 校验；命中就直接跳过，冷启动才联网。
+2. 未命中则用 Qt 报错原文给出的命令（去掉 `ONLY_VERIFY`）联网填充 `~/.gradle`：wrapper 会自行下载 Gradle 9.5.1（分发包实测 140,320,662 字节），再从 google/Maven 拉 AGP 与依赖。
+3. `actions/cache` 缓存 `~/.gradle/caches` 与 `~/.gradle/wrapper`，key 为 `gradle-qt<版本>-bt<build-tools>-v1`，与 host 前缀的 key 无关。
+4. 解析失败时打印 `gradle-wrapper.properties`、`gradlew --version` 与 `~/.gradle` 体积，便于区分“网络/DNS 问题”还是“SDK/build-tools 不匹配”。
+
+不采用的替代方案：`QT_ALLOW_DOWNLOAD=ON`（configure 里写成变量赋值 `QT_ALLOW_DOWNLOAD=ON`）可让校验直接放行、把下载推迟到构建期，但每次构建都依赖网络且不可缓存；直接跳过 jar 目标没有官方开关（`src/android/CMakeLists.txt` 里 `if(ANDROID) add_subdirectory(jar)` 是无条件分支），只能改源码，且产物缺少 `Qt6Android.jar`，使用方 `androiddeployqt` 打包会受影响。
+
 ## 故障排查
 
 ### `Fetch Qt sources` 长时间「解压中: 0 个文件」
@@ -204,6 +222,18 @@ armv7 额外注意：
 
 历史备注：早期用另一种单线程流式压缩包直解，曾出现进度长期为 0、整步阻塞的情况；改为官方 zip + 7-Zip 多线程后不再走那条路径。
 
+### target configure 报 `The offline Gradle check failed ...`
+
+日志形如 `QtJavaHelpers.cmake:66 (_qt_internal_verify_gradle_offline_cache)` ← `src/android/jar/CMakeLists.txt:60 (qt_internal_add_jar)`。含义是 `~/.gradle` 里没有 `Qt6Android.jar` 所需依赖，或 `$ANDROID_SDK_ROOT/build-tools/<rev>` 缺失。
+
+| 现象 | 处理 |
+|---|---|
+| 缓存步骤打印「未命中」后解析成功，但 target configure 仍失败 | 两处的 `GRADLE_BUILD_VARIANT` / `QT_ANDROID_SDK_BUILD_TOOLS_REVISION` 不一致（本工作流两处都用 `Release` + `SDK_BUILD_TOOLS`） |
+| 解析步骤报下载失败 | runner 出网问题；日志里已打印 wrapper 属性与 `gradlew --version`，可区分 DNS/代理，还是 JDK 版本不兼容 |
+| `Android build-tools 'x' is not installed` | SDK 缓存过期或 `SDK_BUILD_TOOLS` 被改，删掉 `android-*` 缓存后重跑 |
+
+不要用 `QT_ALLOW_DOWNLOAD=ON` 作为长期方案：它跳过校验并把下载推到构建期，构建时间与成功率都依赖 runner 当时的网络。
+
 ## 已知限制与未核实项
 
 - **未在本机编译验证**：Qt 6.12 + MinGW 15.1.0 + CMake 4.3.2 的组合以官方版本页为准，是否存在 6.12 特有的配置项差异，需以首轮 CI 结果确认。
@@ -212,6 +242,7 @@ armv7 额外注意：
 - `actions/setup-java` 是否可精确拉到 Temurin `21.0.9` 未在本地核实；失败时会回退到同主版本（需改 workflow）。
 - 标准 runner 的实际可用磁盘可能因镜像不同而波动；工作流只打印、不强制清理系统目录。
 - 全模块构建（仅跳 `qtwebengine`）在 4 vCPU / 14 GB 盘上很可能超时或超盘；需 larger runner（如 `windows-latest-8-cores`）或加长 `skip_modules`。
+- Gradle 阶段的具体耗时与 `~/.gradle` 实际体积**未实测**：冷启动需下载 Gradle 9.5.1 分发包（140,320,662 字节）+ AGP 9.2.1 及其依赖，推断 3–6 分钟；热缓存下只跑离线校验，推断半分钟以内。`actions/cache` 对 `~/.gradle` 的压缩/解压开销也计入该时间。
 - artifact 为未签名的 Qt 前缀，不含 APK，不含 Android 签名材料。
 
 ## 文件
