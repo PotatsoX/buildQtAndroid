@@ -465,7 +465,8 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "host build 失败: $LASTEXITCODE" }
             $t.Stop(); "T_HOST_BUILD={0:N1}" -f $t.Elapsed.TotalSeconds | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
             $t.Restart()
-            & cmake --install .
+            # 剥符号：host bin 约 1.96 GB 中约 0.79 GB 是 COFF 符号，剥掉不影响这些工具运行
+            & cmake --install . --strip
             if ($LASTEXITCODE -ne 0) { throw "host install 失败: $LASTEXITCODE" }
             $t.Stop(); "T_HOST_INSTALL={0:N1}" -f $t.Elapsed.TotalSeconds | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           } finally {
@@ -588,7 +589,8 @@ jobs:
             Write-Output '--- 磁盘(target build 后) ---'
             Get-PSDrive D, C | Select-Object Name, @{n='FreeGB'; e={[math]::Round($_.Free / 1GB, 1)}} | Format-Table
             $t.Restart()
-            & cmake --install .
+            # 剥符号：target .so 约 253 MB 中约 112 MB 是 .symtab/.strtab，运行时只用 .dynsym
+            & cmake --install . --strip
             if ($LASTEXITCODE -ne 0) { throw "target install 失败: $LASTEXITCODE" }
             $t.Stop(); "T_TARGET_INSTALL={0:N1}" -f $t.Elapsed.TotalSeconds | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           } finally {

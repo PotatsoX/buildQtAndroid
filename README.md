@@ -153,7 +153,7 @@ qtwebengine qtgrpc qtserialbus qtscxml qtopcua qtremoteobjects qtactiveqt qtwayl
 
 副作用：TIFF 文件不再可读；png/jpeg/webp/svg/ico/gif 不受影响；`qt_add_resources` 把资源编进二进制，不经过插件，仍按 png 正常加载。SVG 插件与 `QSvgRenderer` 同在 qtsvg 模块，skip qtsvg 会一起消失。
 
-收益（本机官方 Qt 5.15.2 Android arm64 包的 `plugins/imageformats` 实测）：`qtiff` 468.1 KB，关闭后约省 **468 KB/ABI**；保留的 `qgif` 34.6 KB 与 `qico` 36.0 KB 已计入目标格式。整目录约 1.46 MB → 约 1.01 MB/ABI（按同一组实测值相减）。6.12 的实际值见首轮 CI 的 `BUILD-INFO.txt`（会列出插件与体积）。构建期还少编 bundled libtiff（约 40 个 C 文件）。另外 `qtga`/`qwbmp`/`qicns` 无法用 configure 关闭，arm64 上分别约 26.9/25.9/45.7 KB。
+收益（run #9 产物 `plugins/imageformats` 实测，android arm64-v8a）：共 8 个插件 **1.20 MB/ABI**，`qtiff` 已不产出（关闭生效）；保留项为 `qjpeg` 496.9、`qwebp` 460.8、`qicns` 64.5、`qico` 50.6、`qgif` 45.8、`qsvg` 39.4、`qtga` 36.4、`qwbmp` 32.9 KB。对比 Qt 5.15.2 关闭前的 1.46 MB，约省 0.26 MB/ABI。构建期还少编 bundled libtiff（约 40 个 C 文件）。`qtga`/`qwbmp`/`qicns` 无法用 configure 关闭，合计 133.8 KB。
 
 ### host 模块集（`build` 模式）
 
@@ -240,7 +240,8 @@ host 侧参数（`-platform win32-g++`、`-qt-zlib`、`-schannel` 等）只用�
 
 - 静态 host 能否编出、默认 10 个模块的工具是否齐全、`androiddeployqt` 静态版能否读写 `Qt6Android.jar` 与 Gradle wrapper、交叉编译侧 `Qt6*Tools`/`Qt6HostInfo` 是否仍能解析 —— **均需 CI 首轮确认**。
 - 时间：相对 run #6 的 host 2 小时 41 分 48 秒，静态链接通常略增（推断 +10%–20%，未实测）。
-- 体积：静态 exe 内嵌 Qt 库，通常大于“共享 exe + DLL”；裁剪后前缀与 7z 体积**未实测**（推断 250–400 MB / 60–120 MB）。
+- 体积（run #9 实测，host 静态自建）：host 前缀 2015.1 MB / 6890 文件，target 前缀 420.5 MB / 16804 文件，7z 包（`-mx=5`）384.7 MB；其中 host `bin` 1956.3 MB（61 个 exe）占 host 的 97%，`lib` 13.0 MB、`plugins` 25.6 MB、`qml` 9.2 MB、`metatypes` 9.0 MB、`mkspecs` 0.7 MB。删除 bin 以外的全部目录只省 58.0 MB（压缩 5.5 MB），且 `lib/cmake` 是交叉编译刚性依赖，**不值得**再裁。
+- 静态 host 前缀不可重定位：`qmake -query` 能返回编译期的 `D:/qt/host`，但没有 `bin/qt.conf` 时 `qmake` 生成 Makefile 会报 `Could not find qmake spec 'win32-g++'`；补一行 `[Paths] Prefix=..` 的 `bin/qt.conf` 即可（实测）。
 - 自包含（把 host 复制进 target 前缀并改写 `target_qt.conf`/`Qt6Dependencies.cmake`/`qt.toolchain.cmake`）**未落地**：静态 host 尚未经 CI 验证，且官方不建议该组合，当前保留 target/host 双前缀与显式 `QT_HOST_PATH`。若首轮 CI 证明可用，再评估嵌入，并把 `verify-android-prefix.py` 的 PE 计数改为按目录白名单。
 
 ### 磁盘与时间估算（D: 约 14 GB）
