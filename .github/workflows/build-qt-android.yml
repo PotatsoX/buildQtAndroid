@@ -8,9 +8,9 @@ on:
         required: false
         default: "6.12.0"
       skip_modules:
-        description: "要跳过/关闭的模块与特性（空格或逗号分隔）：模块名走 -skip，以 - 开头的原样传给 configure（如 -no-feature-printsupport）。默认 qtwebengine + 10 个模块 + 2 个 feature"
+        description: "要跳过/关闭的模块与特性（空格或逗号分隔）：模块名走 -skip，以 - 开头的原样传给 configure（如 -no-feature-printsupport）。默认 qtwebengine + 10 个模块 + 3 个 feature（含关闭 tiff，保留 png/jpeg/webp/svg/ico/gif）"
         required: false
-        default: "qtwebengine qtgrpc qtserialbus qtscxml qtopcua qtremoteobjects qtactiveqt qtwayland qttasktree qtcoap qtwebchannel -no-feature-printsupport -no-feature-spatialaudio"
+        default: "qtwebengine qtgrpc qtserialbus qtscxml qtopcua qtremoteobjects qtactiveqt qtwayland qttasktree qtcoap qtwebchannel -no-feature-printsupport -no-feature-spatialaudio -no-feature-tiff"
       host_modules:
         description: "build 模式 host 阶段编译的模块：auto=只编 target 构建要用的工具模块；all=全量（只减去 skip_modules）；或逗号分隔自定义"
         required: false
@@ -66,8 +66,11 @@ jobs:
     timeout-minutes: 360
     env:
       QT_VERSION: ${{ inputs.qt_version || '6.12.0' }}
-      QT_SKIP_MODULES: ${{ inputs.skip_modules || 'qtwebengine qtgrpc qtserialbus qtscxml qtopcua qtremoteobjects qtactiveqt qtwayland qttasktree qtcoap qtwebchannel -no-feature-printsupport -no-feature-spatialaudio' }}
+      QT_SKIP_MODULES: ${{ inputs.skip_modules || 'qtwebengine qtgrpc qtserialbus qtscxml qtopcua qtremoteobjects qtactiveqt qtwayland qttasktree qtcoap qtwebchannel -no-feature-printsupport -no-feature-spatialaudio -no-feature-tiff' }}
       HOST_MODULES: ${{ inputs.host_modules || 'auto' }}
+      # auto 白名单：qtbase/qtsvg/qtdeclarative/qtshadertools/qttools/qtscxml/qtremoteobjects/qtgrpc/
+      # qtquick3d/qtquick3dphysics/qtquicktimeline/qtopcua/qtlottie/qtcanvaspainter(6.12 起)
+      HOST_AUTO_MODULES: 'qtbase qtsvg qtdeclarative qtshadertools qttools qtscxml qtremoteobjects qtgrpc qtquick3d qtquick3dphysics qtquicktimeline qtopcua qtlottie qtcanvaspainter'
       HOST_ONLY: ${{ inputs.host_only || 'false' }}
       HOST_MODE_INPUT: ${{ inputs.host_mode || 'auto' }}
       HOST_LINKAGE: ${{ inputs.host_linkage || 'shared' }}
@@ -123,9 +126,16 @@ jobs:
           $key = ($env:QT_SKIP_MODULES -replace '[, ]+', '-').ToLowerInvariant()
           if (-not $key) { $key = 'none' }
           "SKIP_KEY=$key" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          # host 前缀缓存必须区分 host 模块集，否则旧的全量缓存会掩盖最小集的配置错误
-          $hostKey = ($env:HOST_MODULES -replace '[^A-Za-z0-9]+', '-').Trim('-').ToLowerInvariant()
-          if (-not $hostKey) { $hostKey = 'auto' }
+          # host 前缀缓存必须区分 host 模块集，否则旧缓存会掩盖最小集的配置错误；
+          # auto 的实际集合随白名单变化，用白名单散列，避免改了白名单仍命中旧前缀
+          $hostSet = if ($env:HOST_MODULES -eq 'auto') { $env:HOST_AUTO_MODULES } else { $env:HOST_MODULES }
+          $hostKey = ($hostSet -replace '[^A-Za-z0-9]+', '-').Trim('-').ToLowerInvariant()
+          if ($env:HOST_MODULES -eq 'auto') {
+            $sha = [Security.Cryptography.SHA256]::Create()
+            $h = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($hostSet))).Replace('-', '')
+            $hostKey = 'auto-' + $h.Substring(0, 8).ToLowerInvariant()
+          }
+          if (-not $hostKey) { $hostKey = 'none' }
           "HOST_SET_KEY=$hostKey" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Cache Android SDK / NDK
@@ -284,6 +294,11 @@ jobs:
             if (-not ($pkgs | Where-Object { $_.Name -eq "qt.qt6.$shortVer.addons.qtshadertools.win64_mingw" })) {
               return @{ ok = $false; why = '索引内缺少 qtshadertools addons 包（qsb 必需）' }
             }
+            # qtcanvaspainter 6.12 起才有，qcshadergen 是 host 工具
+            if ([version]$wantVer -ge [version]'6.12.0' -and
+                -not ($pkgs | Where-Object { $_.Name -eq "qt.qt6.$shortVer.addons.qtcanvaspainter.win64_mingw" })) {
+              return @{ ok = $false; why = '索引内缺少 qtcanvaspainter addons 包（qcshadergen 必需）' }
+            }
             return @{ ok = $true; why = "官方 $wantVer Windows 桌面包可用（$($main.Version)）" }
           }
 
@@ -331,7 +346,7 @@ jobs:
           $short = $env:QT_VERSION -replace '\.', ''
           $repo = "https://download.qt.io/online/qtsdkrepository/windows_x86/desktop/qt6_$short/qt6_${short}_mingw"
           # qtbase: qmake/moc/rcc/uic/androiddeployqt；qtdeclarative: qmlimportscanner 等
-          # qttools: lrelease/lupdate；qtsvg；addons: qsb/repc/qscxmlc/qtprotoc
+          # qttools: lrelease/lupdate；qtsvg；addons: qsb/repc/qscxmlc/qtprotoc/qcshadergen
           # MinGW-w64 runtime: host 工具的 libgcc/libstdc++/libwinpthread
           $packages = @(
             @{ dir = "qt.qt6.$short.win64_mingw"; archives = @(
@@ -341,6 +356,10 @@ jobs:
             @{ dir = "qt.qt6.$short.addons.qtscxml.win64_mingw"; archives = @('qtscxml-') },
             @{ dir = "qt.qt6.$short.addons.qtgrpc.win64_mingw"; archives = @('qtgrpc-') }
           )
+          # Qt 6.12 起 target 侧编 qtcanvaspainter 需要宿主 qcshadergen
+          if ([version]$env:QT_VERSION -ge [version]'6.12.0') {
+            $packages += @{ dir = "qt.qt6.$short.addons.qtcanvaspainter.win64_mingw"; archives = @('qtcanvaspainter-') }
+          }
           $dl = "$env:WORK_ROOT\host-archives"
           New-Item -ItemType Directory -Force -Path $dl, $env:HOST_PREFIX | Out-Null
           $t = [Diagnostics.Stopwatch]::StartNew()
@@ -388,9 +407,8 @@ jobs:
           } else {
             # auto = 白名单 ∩ target 实际构建的模块：target 跳过的模块不会调用其工具
             $keep = if ($env:HOST_MODULES -eq 'auto') {
-              @('qtbase', 'qtsvg', 'qtdeclarative', 'qtshadertools', 'qttools', 'qtscxml',
-                'qtremoteobjects', 'qtgrpc', 'qtquick3d', 'qtquick3dphysics', 'qtquicktimeline',
-                'qtopcua', 'qtlottie') | Where-Object { $_ -notin $targetSkips }
+              @($env:HOST_AUTO_MODULES -split '[\s,]+' | Where-Object { $_ }) |
+                Where-Object { $_ -in $allModules -and $_ -notin $targetSkips }
             } else {
               @($env:HOST_MODULES -split '[\s,]+' | Where-Object { $_ })
             }
@@ -684,6 +702,13 @@ jobs:
             if ($v) { "{0}: {1:N1} 分钟（{2} 秒）" -f $label, ([double]$v / 60), $v } else { "{0}: 未记录" -f $label }
           }
           $adqHelp = (Get-Cmd "$env:HOST_PREFIX\bin\androiddeployqt.exe" @('--help')) -split "`n" | Select-Object -First 5
+          # target 安装包里的图像插件清单，便于首轮 CI 核对 -no-feature-tiff 的实际效果
+          $imgDir = Join-Path $env:TARGET_PREFIX 'plugins\imageformats'
+          $imgLines = if (Test-Path $imgDir) {
+            @(Get-ChildItem $imgDir -File | Sort-Object Name | ForEach-Object {
+              '  {0} ({1:N1} KB)' -f $_.Name, ($_.Length / 1KB)
+            })
+          } else { @('  n/a（目录不存在）') }
           $lines = @(
             'Qt for Android 构建环境与参数',
             '编码: UTF-8 with BOM（Windows 记事本可直接打开）',
@@ -739,6 +764,7 @@ jobs:
             "qtpaths -query QT_VERSION: $(Get-Cmd "$env:HOST_PREFIX\bin\qtpaths.exe" @('-query', 'QT_VERSION'))",
             'androiddeployqt --help（前 5 行）:'
           ) + @($adqHelp)
+          $lines += @('', "[target 图像格式插件]（$($imgLines.Count) 项）") + @($imgLines)
           # Set-Content -Encoding utf8 在 Windows PowerShell 下写 UTF-8 with BOM
           Set-Content -Path "$env:WORK_ROOT\BUILD-INFO.txt" -Value $lines -Encoding utf8
           Write-Output "已生成 BUILD-INFO.txt（$(($lines | Measure-Object).Count) 行）"

@@ -49,7 +49,7 @@
 | 参数 | 默认值 | 说明 |
 |---|---|---|
 | `qt_version` | `6.12.0` | 源码版本，下载 `qt-everywhere-src-<ver>.zip` |
-| `skip_modules` | `qtwebengine` + 10 模块 + 2 feature | 空格/逗号分隔：模块名传给 configure `-skip`；以 `-` 开头的原样传给 configure（如 `-no-feature-printsupport`）。完整默认值见「模块选择机制」 |
+| `skip_modules` | `qtwebengine` + 10 模块 + 3 feature | 空格/逗号分隔：模块名传给 configure `-skip`；以 `-` 开头的原样传给 configure（如 `-no-feature-printsupport`）。默认另含 `-no-feature-tiff`，保留 png/jpeg/webp/svg/ico/gif。完整默认值见「模块选择机制」 |
 | `host_only` | `false` | 只构建 host 工具，便于排错 |
 | `host_mode` | `auto` | host Qt 来源：`auto`（官方包优先，缺失回退源码自建）/ `official`（强制官方包，探测失败直接失败）/ `build`（强制源码自建） |
 | `host_modules` | `auto` | 仅 `build` 模式生效：`auto` = 只编 target 构建要用的工具模块；`all` = 全量（只减去 `skip_modules` 里的模块名）；也可给逗号分隔的模块名，未知模块直接报错 |
@@ -63,12 +63,12 @@
 2. 安装固定版本 JDK、Python、CMake、Ninja、Perl、7-Zip、Android SDK/NDK（MinGW 只在 `build` 模式、在 host 步骤内部下载，`official` 路径不付这笔开销）。
 3. `scripts/fetch-qt-source.ps1` 下载官方 **zip** 归档（md5 校验取自 `md5sums.txt` 的 zip 行；`official_releases` 与 `archive` 两处都试），用 7-Zip 多线程**全量解压**；每 30 秒打印已解出文件数、累计字节数、7z 的 CPU 秒数与工作集。
 4. **host 工具**（`Resolve host Qt mode` 决定走哪条）：
-   - `official`：从 `download.qt.io` 下载该版本 Windows 桌面归档（qtbase/qtdeclarative/qttools/qtsvg + qtshadertools/qtremoteobjects/qtscxml/qtgrpc + MinGW runtime），解压到 `D:\qt\host`，`qmake.exe -v` 自检并断言版本；
+   - `official`：从 `download.qt.io` 下载该版本 Windows 桌面归档（qtbase/qtdeclarative/qttools/qtsvg + qtshadertools/qtremoteobjects/qtscxml/qtgrpc/qtcanvaspainter + MinGW runtime），解压到 `D:\qt\host`，`qmake.exe -v` 自检并断言版本；
    - `build`：MinGW 15.1.0 桌面 `configure -skip <host_skip_modules>` → build → install 到 `D:\qt\host`，`.cache-ok` 标记（内容为 `build:<linkage>:<host_set>`）后删 build 目录；`host_skip_modules` 由 `host_modules` 推出，默认只编 target 构建会用到的工具模块（见「host 模块集」）；`host_linkage=static` 时追加 `-static -static-runtime -DFEATURE_relocatable=ON`（见「host 链接方式」）。
 5. **Gradle 离线缓存准备**：按 `qtbase/cmake/QtJavaHelpers.cmake` 报错给出的命令调用 `cmake\QtSetupAndroid.cmake`，先把 `Qt6Android` JAR 的 Gradle 依赖填进 `~/.gradle`（已命中则跳过联网）。
 6. **target 构建**：`configure.bat ... -qt-host-path D:\qt\host -android-abis <abi> -android-sdk ... -android-ndk ... -no-feature-sql-* -skip <模块> <feature 参数>`，安装到 `D:\qt\android_<abi>`；实际命令行原文写入 `target-configure.txt`，最终进 `BUILD-INFO.txt`。
 7. `scripts/verify-android-prefix.py` 校验 ABI/关键库/host 工具/`Qt6HostInfo`/`Qt6Android.jar`/Gradle wrapper，输出 `manifest.json`。
-8. 生成 `BUILD-INFO.txt`（UTF-8 with BOM，压缩包顶层），记录版本/ABI/host 来源与链接方式、skip 项、host 生效模块、host/target configure 原文、工具链版本、runner 环境、`T_*` 阶段耗时与产物自检输出。
+8. 生成 `BUILD-INFO.txt`（UTF-8 with BOM，压缩包顶层），记录版本/ABI/host 来源与链接方式、skip 项、host 生效模块、host/target configure 原文、工具链版本、runner 环境、`T_*` 阶段耗时、产物自检输出与 target 图像插件清单。
 9. 7z 打包 **target + host 两个前缀 + `BUILD-INFO.txt`**并上传 artifact：`qt-<ver>-android-<abi>-windows-host`。
 
 磁盘布局：源码、构建目录与安装前缀放在 **D:**（runner 临时盘）；SDK/NDK/工具装在 **C:**，避免挤占 14 GB 的 D: 盘。
@@ -101,10 +101,10 @@ Qt 顶层 `configure` **不做自动选择**：源码树里有哪个模块目录
 默认值：
 
 ```
-qtwebengine qtgrpc qtserialbus qtscxml qtopcua qtremoteobjects qtactiveqt qtwayland qttasktree qtcoap qtwebchannel -no-feature-printsupport -no-feature-spatialaudio
+qtwebengine qtgrpc qtserialbus qtscxml qtopcua qtremoteobjects qtactiveqt qtwayland qttasktree qtcoap qtwebchannel -no-feature-printsupport -no-feature-spatialaudio -no-feature-tiff
 ```
 
-`qtwebengine` 保留在默认值里（构建开销最大且 Android 侧通常不需要）；其余为本次指定的 10 个模块 + 2 个特性。
+`qtwebengine` 保留在默认值里（构建开销最大且 Android 侧通常不需要）；其余为本次指定的 10 个模块 + 3 个特性（PrintSupport、SpatialAudio、TIFF）。GIF 明确保留。
 
 用户清单 → 实际开关：
 
@@ -123,9 +123,37 @@ qtwebengine qtgrpc qtserialbus qtscxml qtopcua qtremoteobjects qtactiveqt qtwayl
 | WebChannel | `qtwebchannel` | `-skip qtwebchannel` | 是 |
 | TaskTree | **独立模块** `qttasktree`（不在 qtbase 内） | `-skip qttasktree` | 是：`qt5` 6.12.0 顶层目录，`qttasktree/dependencies.yaml` 仅依赖 qtbase |
 
-没有“无法按用户方式关闭”的项；`Print Support` 与 `Spatial Audio` 用 feature 开关，代价是各自模块内的对应功能不可用。
+上述 12 项没有“无法按用户方式关闭”的项；`Print Support` 与 `Spatial Audio` 用 feature 开关，代价是各自模块内的对应功能不可用。
 
 为什么不采用「解压后删掉不需要的模块」：configure 要遍历源码树，缺目录会被当作模块不存在而跳过，删源码省不了 configure 时间，还多一轮十几万文件的删除写操作。缩小范围只用 `-skip` 与 feature 开关。
+
+### 图像格式（默认只保留 png / jpeg / webp / svg / ico / gif）
+
+默认 `skip_modules` 末尾只追加 `-no-feature-tiff`，`ico`、`gif` 保持开启。Qt 6.12 的图像格式分三类：
+
+| 格式 | 实现位置 | 默认开关 | 源码依据 |
+|---|---|---|---|
+| png | qtbase QtGui **内建 handler**（不是插件） | 保留；`-no-feature-png` 会把 PNG 整体去掉，不要用 | [qtbase/src/gui/configure.cmake:1202](https://github.com/qt/qtbase/blob/v6.12.0/src/gui/configure.cmake#L1202)、[qtbase/src/gui/CMakeLists.txt:668-671](https://github.com/qt/qtbase/blob/v6.12.0/src/gui/CMakeLists.txt#L668-L671) |
+| bmp / ppm / xbm / xpm | qtbase QtGui **内建 handler** | 始终编译，**没有 feature 开关** | [qtbase/src/gui/CMakeLists.txt:69,89-91](https://github.com/qt/qtbase/blob/v6.12.0/src/gui/CMakeLists.txt#L69-L91) |
+| jpeg | qtbase 插件 `qjpeg` | 保留 | [configure.cmake:1190-1196](https://github.com/qt/qtbase/blob/v6.12.0/src/gui/configure.cmake#L1190-L1196)、[qtbase/src/plugins/imageformats/CMakeLists.txt:7-9](https://github.com/qt/qtbase/blob/v6.12.0/src/plugins/imageformats/CMakeLists.txt#L7-L9) |
+| gif | qtbase 插件 `qgif` | 保留（明确选择，`QMovie`/`AnimatedImage` 动图可用） | [configure.cmake:1180-1184](https://github.com/qt/qtbase/blob/v6.12.0/src/gui/configure.cmake#L1180-L1184)、[CMakeLists.txt:10-12](https://github.com/qt/qtbase/blob/v6.12.0/src/plugins/imageformats/CMakeLists.txt#L10-L12) |
+| ico | qtbase 插件 `qico` | 保留（目标格式之一） | [configure.cmake:1185-1189](https://github.com/qt/qtbase/blob/v6.12.0/src/gui/configure.cmake#L1185-L1189)、[CMakeLists.txt:4-6](https://github.com/qt/qtbase/blob/v6.12.0/src/plugins/imageformats/CMakeLists.txt#L4-L6) |
+| webp | qtimageformats 插件 `qwebp`（内含 libwebp 源码） | 保留 | [qtimageformats/src/imageformats/configure.cmake:76-87](https://github.com/qt/qtimageformats/blob/v6.12.0/src/imageformats/configure.cmake#L76-L87)、[.../plugins/imageformats/CMakeLists.txt:17-19](https://github.com/qt/qtimageformats/blob/v6.12.0/src/plugins/imageformats/CMakeLists.txt#L17-L19) |
+| tiff | qtimageformats 插件 `qtiff`（内含 libtiff 源码） | **关闭**：`-no-feature-tiff` | [configure.cmake:65-76](https://github.com/qt/qtimageformats/blob/v6.12.0/src/imageformats/configure.cmake#L65-L76)、[CMakeLists.txt:14-16](https://github.com/qt/qtimageformats/blob/v6.12.0/src/plugins/imageformats/CMakeLists.txt#L14-L16) |
+| svg | qtsvg 插件 `qsvg`（`Qt::SvgPrivate`） | 保留；**不能** `-skip qtsvg` | [qtsvg/src/plugins/imageformats/CMakeLists.txt:4](https://github.com/qt/qtsvg/blob/v6.12.0/src/plugins/imageformats/CMakeLists.txt#L4)、[.../svg/CMakeLists.txt:8-18](https://github.com/qt/qtsvg/blob/v6.12.0/src/plugins/imageformats/svg/CMakeLists.txt#L8-L18) |
+
+插件是否真的不产出，取决于 `qt_internal_add_plugin` 外层有没有 `if(QT_FEATURE_<name>)`：gif/ico/jpeg 在 [qtbase/src/plugins/imageformats/CMakeLists.txt](https://github.com/qt/qtbase/blob/v6.12.0/src/plugins/imageformats/CMakeLists.txt#L4-L12) 里按 feature 决定 `add_subdirectory`，tiff/webp 在 [qtimageformats 同名文件](https://github.com/qt/qtimageformats/blob/v6.12.0/src/plugins/imageformats/CMakeLists.txt#L14-L19) 里同理；所以 `-no-feature-tiff` 是“整目录不参与构建”，不是只改编译选项。`tiff` 是 qtimageformats 的模块级 feature，configure 在解析参数前会收集所有模块的 feature，可直接用 `-no-feature-<name>`；若某版本报 unknown feature，退化为 `-DFEATURE_tiff=OFF`。
+
+**无法用 configure 单独关闭**（明确保留，不做静默处理）：
+
+- `bmp`/`ppm`/`xbm`/`xpm`：handler 无条件编进 QtGui，Qt 6.12 没给 feature。
+- `tga`、`wbmp`：qtimageformats 顶层无条件 `add_subdirectory`（[CMakeLists.txt:12-13](https://github.com/qt/qtimageformats/blob/v6.12.0/src/plugins/imageformats/CMakeLists.txt#L12-L13)）。
+- `icns`：只受 qtbase `regularexpression` feature 门控（[:23-25](https://github.com/qt/qtimageformats/blob/v6.12.0/src/plugins/imageformats/CMakeLists.txt#L23-L25)），单关它要 `-no-feature-regularexpression`，会连带去掉 QRegularExpression，不可接受。
+- `mng`/`jasper`(jp2)：`AUTODETECT OFF` 且需 libmng/JasPer，默认不构建；Qt 6.12 的 qtimageformats **没有 heic 插件**。
+
+副作用：TIFF 文件不再可读；png/jpeg/webp/svg/ico/gif 不受影响；`qt_add_resources` 把资源编进二进制，不经过插件，仍按 png 正常加载。SVG 插件与 `QSvgRenderer` 同在 qtsvg 模块，skip qtsvg 会一起消失。
+
+收益（本机官方 Qt 5.15.2 Android arm64 包的 `plugins/imageformats` 实测）：`qtiff` 468.1 KB，关闭后约省 **468 KB/ABI**；保留的 `qgif` 34.6 KB 与 `qico` 36.0 KB 已计入目标格式。整目录约 1.46 MB → 约 1.01 MB/ABI（按同一组实测值相减）。6.12 的实际值见首轮 CI 的 `BUILD-INFO.txt`（会列出插件与体积）。构建期还少编 bundled libtiff（约 40 个 C 文件）。另外 `qtga`/`qwbmp`/`qicns` 无法用 configure 关闭，arm64 上分别约 26.9/25.9/45.7 KB。
 
 ### host 模块集（`build` 模式）
 
@@ -142,20 +170,22 @@ qtwebengine qtgrpc qtserialbus qtscxml qtopcua qtremoteobjects qtactiveqt qtwayl
 | qtscxml | `Qt6ScxmlTools` | `qscxmlc` |
 | qtremoteobjects | `Qt6RemoteObjectsTools` | `repc` |
 | qtgrpc（含 qtprotobuf） | `Qt6GrpcTools` / `Qt6ProtobufTools` | `qtprotoc` `qtgrpcgen` `qtprotobufgen` |
+| qtcanvaspainter（6.12 新增） | `Qt6CanvasPainterTools` | `qcshadergen` |
 
-结论：为了让 target 的**所有**模块都能编，`qtbase` + `qtdeclarative` + `qttools` + `qtshadertools` **四块不够**，还缺 **qtscxml**（`qscxmlc`）、**qtremoteobjects**（`repc`）、**qtgrpc**（`qtprotoc`/`qtgrpcgen`，连带 `Qt6ProtobufTools`）。但默认 `skip_modules` 已跳过这三项，因此默认可用的 `auto` 集合不含它们；如果把对应模块从 skip 里去掉，必须把 host 侧对应模块加回。
+结论：为了让 target 的**所有**模块都能编，`qtbase` + `qtdeclarative` + `qttools` + `qtshadertools` **四块不够**，还缺 **qtscxml**（`qscxmlc`）、**qtremoteobjects**（`repc`）、**qtgrpc**（`qtprotoc`/`qtgrpcgen`，连带 `Qt6ProtobufTools`）与 **qtcanvaspainter**（`qcshadergen`，6.12 新增、默认不 skip）。默认 `skip_modules` 已跳过前三项，因此默认 `auto` 集合不含它们；`qtcanvaspainter` 默认参与构建，host 侧必须常驻白名单。
 
 `qtgrpc` 另有宿主 `protoc` 依赖：`Qt6GrpcToolsDependencies.cmake:7` 写的是 `set(__qt_GrpcTools_tool_third_party_deps "WrapProtoc\\;FALSE\\;\\;\\;")`，Qt 包内不含 protoc，需 CI 或宿主安装 protobuf。默认已 `-skip qtgrpc`，默认流程不再触发该依赖（见「已知限制」）。
 
-`auto` 候选白名单 13 个模块；按默认 `skip_modules` 过滤后实际生效 **9 个**：
+`auto` 候选白名单 14 个模块；按默认 `skip_modules` 过滤后实际生效 **10 个**：
 
 | 模块 | 依据 |
 |---|---|
-| qtbase、qtdeclarative、qttools、qtshadertools、qtscxml、qtremoteobjects、qtgrpc | 上表的 tool deps 声明 |
+| qtbase、qtdeclarative、qttools、qtshadertools、qtscxml、qtremoteobjects、qtgrpc、qtcanvaspainter | 上表的 tool deps 声明 |
 | qtsvg | 无独立 host 工具，体积小；作为桌面包完整性保险保留 |
-| qtquick3d、qtquick3dphysics、qtquicktimeline、qtopcua、qtlottie | 源码树带构建期工具（`shadergen`/`balsam`/`cooker`/`datatypecodegenerator`/`lottietoqml`），但官方安装包里没有对应的 `Qt6<Module>Tools` 声明，**未确认** target 构建是否消费；按“不确定就留在 host 侧”保留 |
+| qtquick3d、qtopcua、qtlottie | 源码树有 `qt_internal_add_tool`（`balsam`/`shadergen`/`instancer`/`shapegen`、`datatypecodegenerator`/`internalgenerator`、`lottietoqml`）；target 构建是否消费未核实 |
+| qtquick3dphysics、qtquicktimeline | 无 host 工具（`cooker` 是 app；qtquicktimeline 6.12 无 `tools` 目录），按“不确定就留在 host 侧”保留 |
 
-按默认 `skip_modules` 被过滤掉的 4 个：`qtscxml`、`qtremoteobjects`、`qtgrpc`、`qtopcua`。因此默认 host 生效集合为：`qtbase`、`qtsvg`、`qtdeclarative`、`qtshadertools`、`qttools`、`qtquick3d`、`qtquick3dphysics`、`qtquicktimeline`、`qtlottie`。
+按默认 `skip_modules` 被过滤掉的 4 个：`qtscxml`、`qtremoteobjects`、`qtgrpc`、`qtopcua`。因此默认 host 生效集合为：`qtbase`、`qtsvg`、`qtdeclarative`、`qtshadertools`、`qttools`、`qtquick3d`、`qtquick3dphysics`、`qtquicktimeline`、`qtlottie`、`qtcanvaspainter`。
 
 `host_modules` 取值：
 
@@ -180,6 +210,7 @@ qtwebengine qtgrpc qtserialbus qtscxml qtopcua qtremoteobjects qtactiveqt qtwayl
 | `-nomake examples`、`-nomake tests` | target | 同上 |
 | `-skip <skip_modules 中的模块名>` | target + host(build) | 参考项目 build-Qt6mingw64.cmd:33 引入；默认值见「模块选择机制」 |
 | `-no-feature-printsupport`、`-no-feature-spatialaudio` | target | 按本次指定关闭；feature 名来自 `qtbase/configure.cmake:1146-1151` 与 `qtmultimedia/src/multimedia/configure.cmake:281-287` |
+| `-no-feature-tiff` | target | 保留 png/jpeg/webp/svg/ico/gif，只关 tiff；feature 名来自 `qtimageformats/src/imageformats/configure.cmake:65`（详见「图像格式」） |
 | `-qt-host-path` | target | Qt 6 交叉编译必需 |
 | `-android-abis`、`-android-sdk`、`-android-ndk` | target | Qt 6 Android 必需 |
 | `-android-javac-source 17`、`-android-javac-target 17` | target | Qt 6 Android 必需（配套 JDK 21） |
@@ -187,7 +218,7 @@ qtwebengine qtgrpc qtserialbus qtscxml qtopcua qtremoteobjects qtactiveqt qtwayl
 
 host 侧参数（`-platform win32-g++`、`-qt-zlib`、`-schannel` 等）只用于 `build` 模式的 host configure；`official` 模式不执行 configure。
 
-不采用的参考项：target 侧不用 `-static`、`-static-runtime`（Android 产物必须是共享库 `.so`，Qt 不支持静态 target）；host 侧的 `-static`/`-static-runtime` 通过 `host_linkage=static` 显式开启（见「host 链接方式」）。`-qt-webp`、`-qt-tiff`、`-qt-pcre`（Qt 6 已无对应捆绑库/选项，**未核实**，传下去会报 unknown option）、`-opengl desktop`（Android 走 GLES）同样不采用。
+不采用的参考项：target 侧不用 `-static`、`-static-runtime`（Android 产物必须是共享库 `.so`，Qt 不支持静态 target）；host 侧的 `-static`/`-static-runtime` 通过 `host_linkage=static` 显式开启（见「host 链接方式」）。`-qt-webp`、`-qt-tiff`、`-qt-pcre`（Qt 6 已无这些捆绑库开关，**未核实**，传下去会报 unknown option；webp/tiff 改用 `-no-feature-webp`/`-no-feature-tiff`）、`-opengl desktop`（Android 走 GLES）同样不采用。
 
 ### host 链接方式（`build` 模式，输入 `host_linkage`）
 
@@ -207,7 +238,7 @@ host 侧参数（`-platform win32-g++`、`-qt-zlib`、`-schannel` 等）只用�
 
 未验证项（本机没有 Qt 源码与 MinGW 15.1.0，只验证了本机 MinGW 8.1.0 的 `gcc -static` 能正常链接）：
 
-- 静态 host 能否编出、默认 9 个模块的工具是否齐全、`androiddeployqt` 静态版能否读写 `Qt6Android.jar` 与 Gradle wrapper、交叉编译侧 `Qt6*Tools`/`Qt6HostInfo` 是否仍能解析 —— **均需 CI 首轮确认**。
+- 静态 host 能否编出、默认 10 个模块的工具是否齐全、`androiddeployqt` 静态版能否读写 `Qt6Android.jar` 与 Gradle wrapper、交叉编译侧 `Qt6*Tools`/`Qt6HostInfo` 是否仍能解析 —— **均需 CI 首轮确认**。
 - 时间：相对 run #6 的 host 2 小时 41 分 48 秒，静态链接通常略增（推断 +10%–20%，未实测）。
 - 体积：静态 exe 内嵌 Qt 库，通常大于“共享 exe + DLL”；裁剪后前缀与 7z 体积**未实测**（推断 250–400 MB / 60–120 MB）。
 - 自包含（把 host 复制进 target 前缀并改写 `target_qt.conf`/`Qt6Dependencies.cmake`/`qt.toolchain.cmake`）**未落地**：静态 host 尚未经 CI 验证，且官方不建议该组合，当前保留 target/host 双前缀与显式 `QT_HOST_PATH`。若首轮 CI 证明可用，再评估嵌入，并把 `verify-android-prefix.py` 的 PE 计数改为按目录白名单。
@@ -219,7 +250,7 @@ host 侧参数（`-platform win32-g++`、`-qt-zlib`、`-schannel` 等）只用�
 | 全量解压（默认） | 约 1.3–1.5 GB | 约 12–15 万（推断） | 3–8 分钟（推断，zip + 7-Zip 多线程） |
 
 - 构建目录（推断，未实测）：target 8–12 GB；峰值需同时容纳源码 + target 构建目录 + target 前缀 + host 前缀（1.4 GB），全模块很可能触到 D: 14 GB 上限。
-- 时间：`official` 路径为下载约 196 MB + 解压约 1.4 GB（本机实测 20 余秒；CI 上受网络影响，推断 2–4 分钟）；`build` 路径 host 全模块在 run #6 实测 **2 小时 41 分 48 秒**，`host_modules=auto` 默认只编 9 个模块（跳过 qtgrpc/qtscxml/qtremoteobjects/qtopcua），推断省 45–75 分钟（待 CI 的 `T_HOST_*` 计时校准）。剩下的大头是 target（run #6 实测 1 小时 39 分 26 秒）；默认 skip 了 10 个模块与 2 个 feature，target 侧推断再省 5–15 分钟、磁盘占用小幅下降（均未实测）。4 vCPU 下全模块仍有超 6 小时风险；可选办法：换 larger runner，或继续加长 `skip_modules`（只改运行参数）。`official` 模式不编译 host，host 口径对它无影响。
+- 时间：`official` 路径为下载约 196 MB + 解压约 1.4 GB（本机实测 20 余秒；CI 上受网络影响，推断 2–4 分钟）；`build` 路径 host 全模块在 run #6 实测 **2 小时 41 分 48 秒**，`host_modules=auto` 默认只编 10 个模块（跳过 qtgrpc/qtscxml/qtremoteobjects/qtopcua），推断省 45–75 分钟（待 CI 的 `T_HOST_*` 计时校准）。剩下的大头是 target（run #6 实测 1 小时 39 分 26 秒）；默认 skip 了 10 个模块与 3 个 feature，target 侧推断再省 5–15 分钟、磁盘占用小幅下降（均未实测）。关闭 `qtiff` 后不再编 bundled libtiff（约 40 个 C 文件），推断再省 1–3 分钟；target 前缀少约 0.46 MB/ABI（按 Qt 5.15.2 官方 Android 包实测，6.12 待 CI 校准）。4 vCPU 下全模块仍有超 6 小时风险；可选办法：换 larger runner，或继续加长 `skip_modules`（只改运行参数）。`official` 模式不编译 host，host 口径对它无影响。
 - 解压开销构成：每文件一次的实时写入 + 扫描是主因，压缩流解码只占几十秒。工作流因此在装工具前加了 Defender 路径排除（`D:\qt`、`C:\tools`、`C:\android`、workspace），失败不致命。
 - 源码用官方 **zip**（604,643,023 字节，md5 `64889aee0623311cce096be5f445c7d1`，取自官方 `md5sums.txt` 的 zip 行）：比同内容的 tar 大 36%，但 271 MB/s 下下载只差约 1 秒，换来 7-Zip 多线程解压且不必先解成中转文件。
 - host 前缀体积：`build` 模式自建 1.4 GB，裁剪后 285.1 MB，按 7z `-mx=5` 单独实测 **60 MB**；明细见「host 前缀内容与用途」。`official` 模式的 host 前缀是同一批官方归档的解压结果，裁剪后体积同级。`host_linkage=static` 的体积与耗时为推断值（见「host 链接方式」）。target 前缀结构未做裁剪（本机不可测，标注为未核实）。
@@ -232,9 +263,9 @@ host 侧参数（`-platform win32-g++`、`-qt-zlib`、`-schannel` 等）只用�
 | 源码归档（约 605 MB） | `qt-src-zip-<qt_version>-v1` |
 | Android SDK/NDK（约 3 GB） | `android-<ndk>-<platform>-<build-tools>-<cmdline>-v1` |
 | Gradle home（推断 1–2 GB） | `gradle-qt<qt_version>-bt<build-tools>-v1` |
-| host 前缀（仅 `build`，1.4 GB） | `qt-host-build-<qt_version>-<skip_key>-<linkage>-hostset<host_set>-mingw<ver>-cmake<ver>-v1` |
+| host 前缀（仅 `build`，1.4 GB） | `qt-host-build-<qt_version>-<skip_key>-<linkage>-hostset<host_set>-mingw<ver>-cmake<ver>-v1`；`auto` 时 `<host_set>` 为白名单内容的 8 位散列 |
 
-`host_set` 是 `host_modules` 的归一化串（非字母数字 → `-`、小写）；`.cache-ok` 标记内容为 `build:<linkage>:<host_set>`，恢复缓存后还会再校验一次，避免把旧的全量前缀当最小集用。`<linkage>` 为 `shared`/`static`，两种链接方式的前缀不可互换。
+`host_set` 是 `host_modules` 的归一化串（非字母数字 → `-`、小写）；`auto` 时取白名单内容的 SHA-256 前 8 位（`auto-xxxxxxxx`），白名单一变缓存即失效。`.cache-ok` 标记内容为 `build:<linkage>:<host_set>`，恢复缓存后还会再校验一次，避免把旧的全量前缀当最小集用。`<linkage>` 为 `shared`/`static`，两种链接方式的前缀不可互换。
 
 `official` 路径的 host 前缀不入缓存：官方包的确定性解压结果，重下解压（约 2 分钟）比读写 1.4 GB 缓存更划算，也不占 10 GB 配额。两条路径的缓存步骤按 `HOST_MODE_RESOLVED` 门控，不会互相命中。target 构建目录不入缓存。
 
@@ -254,7 +285,7 @@ host 阶段由输入 `host_mode` 控制（默认 `auto`）：
 2. 存在 `qt.qt6.<digits>.win64_mingw`；
 3. 该包 `<Version>` 取第一个 `-` 之前的值与 `qt_version` **全字符串相等**（`6.12.0-0-202609280346` → `6.12.0`），不做前缀/模糊匹配；
 4. 主包 `DownloadableArchives` 含 `qtbase-`/`qtdeclarative-`/`qttools-`/`qtsvg-`；
-5. 存在 `qtshadertools`/`qtremoteobjects`/`qtscxml`/`qtgrpc` 四个 addons 包（默认 skip 已关闭后三者，实际只需 qsb；探测仍保守要求，缺失只会让 `auto` 回退到 `build`）。
+5. 存在 `qtshadertools`/`qtremoteobjects`/`qtscxml`/`qtgrpc`/`qtcanvaspainter` 五个 addons 包（默认 skip 关闭后三者，实际需要 qsb 与 qcshadergen；探测仍保守要求 qtshadertools 与 qtcanvaspainter（≥6.12），缺失只会让 `auto` 回退到 `build`）。
 
 实测（2026-11-04，逐条 `curl` + 解析）：
 
@@ -293,7 +324,7 @@ host 阶段由输入 `host_mode` 控制（默认 `auto`）：
 
 ## 使用方法
 
-1. 打开仓库 **Actions → build-qt-android → Run workflow**，保持默认参数后运行（`skip_modules` 默认已跳过 qtwebengine + 10 个模块 + 2 个 feature，见「模块选择机制」）；若担心 6 小时上限，可继续加长跳过列表。
+1. 打开仓库 **Actions → build-qt-android → Run workflow**，保持默认参数后运行（`skip_modules` 默认已跳过 qtwebengine + 10 个模块 + 3 个 feature，见「模块选择机制」）；若担心 6 小时上限，可继续加长跳过列表。
 2. 成功后在该 run 页面下载 artifact；如推送了 `qt-*` tag，还会生成 Release 附件。7z 顶层含 `BUILD-INFO.txt`，记录本次的 configure 原文、工具链版本、阶段耗时与自检输出。
 3. 使用产物：
 
@@ -311,7 +342,7 @@ cmake -S <your-app> -B build `
 
 > `QT_HOST_PATH` 必须显式指向解压出来的 `host\`：target 前缀里的 `lib/cmake/Qt6/Qt6Dependencies*.cmake` 记录的是构建机上的绝对路径 `D:/qt/host`（`qtbase/cmake/QtPostProcessHelpers.cmake:429-435` 的已知限制），换机器后只能靠 `QT_HOST_PATH` 覆盖；不设置且该路径不存在时，`find_package(Qt6)` 会直接报 “host Qt not found”。
 
-> 两种 host 来源对你的工程没有能力差异：交叉编译的库与头文件都来自 `target` 前缀，host 只提供工具。`official` 的 host 是官方完整桌面工具集；`build` 的 host 默认只含 9 个工具模块（白名单 13 个，减去默认 skip 的 4 个，见「host 模块集」），少了 `designer`/`assistant`/`linguist` 等桌面工具，但这些不参与 Android 构建。若工程用到 host 白名单之外的模块工具，configure 会报找不到工具——此时用 `official`，或在 `host_modules` 里把该模块加进去重跑 `build`。
+> 两种 host 来源对你的工程没有能力差异：交叉编译的库与头文件都来自 `target` 前缀，host 只提供工具。`official` 的 host 是官方完整桌面工具集；`build` 的 host 默认只含 10 个工具模块（白名单 14 个，减去默认 skip 的 4 个，见「host 模块集」），少了 `designer`/`assistant`/`linguist` 等桌面工具，但这些不参与 Android 构建。若工程用到 host 白名单之外的模块工具，configure 会报找不到工具——此时用 `official`，或在 `host_modules` 里把该模块加进去重跑 `build`。
 
 > `host_linkage=static` 只改变 host 前缀结构（`bin` 内无 `Qt6*.dll`），产物仍是 target + host 双前缀，用户侧命令不变（仍需 `-DQT_HOST_PATH`）。
 
@@ -349,7 +380,7 @@ cmake -S <your-app> -B build `
 | `mkspecs\`、`share\` | 1.4 MB | `qmake`/`qtpaths` 的查询数据 |
 | `modules\`、`phrasebooks\` | 0.4 MB | 模块元数据/短语库，未确认 `androiddeployqt` 是否读取，保留 |
 
-> 产物不是 Windows 桌面开发 SDK：`lib\*.a` 已删，链接桌面程序会失败；host 前缀只用于交叉编译与 `androiddeployqt`。`build` 模式的 host 默认只含 9 个工具模块（白名单 13 个，见「host 模块集」）。
+> 产物不是 Windows 桌面开发 SDK：`lib\*.a` 已删，链接桌面程序会失败；host 前缀只用于交叉编译与 `androiddeployqt`。`build` 模式的 host 默认只含 10 个工具模块（白名单 14 个，见「host 模块集」）。
 
 ## 验证方式
 
@@ -501,7 +532,7 @@ armv7 额外注意：
 | host/target 版本 | “Ensure you use the same version of Qt for the host and target Qt” | `official` 解压后 `qmake -query QT_VERSION` 与 `qt_version` 全串比较，不等直接 `throw` | 一致 |
 | host 静态 | “Avoid building the host Qt statically if the target Qt is built shared.” | 默认 `shared`，`static` 仅 opt-in | 一致（static 是已知偏离） |
 | `QT_HOST_PATH` | configure 用 `-qt-host-path <host>`；直接用 CMake 用 `-DQT_HOST_PATH` | target configure 传 `-qt-host-path`；用户工程传 `-DQT_HOST_PATH` | 一致 |
-| host 模块范围 | “build the same Qt modules on the host that you'll need on the target” | 按 tool deps 反推最小集，默认 9 个 | 比官方建议更窄，风险见「已知限制」 |
+| host 模块范围 | “build the same Qt modules on the host that you'll need on the target” | 按 tool deps 反推最小集，默认 10 个 | 比官方建议更窄，风险见「已知限制」 |
 | Windows 编译器 | “Mingw-w64 13.1 toolchain” | `build` 模式用 MinGW 15.1.0 | 偏离：15.1.0 与官方 Windows 桌面包一致，`official` 模式不用 MinGW；暂不改，CI 失败再降级 |
 | 生成器 | 有 `ninja` 时总是使用 Ninja | 安装 Ninja 1.10.2 并置于 PATH，不显式传 `-G` | 一致（由 configure 自动选择） |
 | javac | `-android-javac-source 17 -android-javac-target 17` | 同 | 一致 |
@@ -582,7 +613,7 @@ Qt 6.12 里 Android 的 `Qt6Android.jar` 由源码树内的 Gradle 工程构建�
 3. **工具链**：NDK（含 `source.properties` 的 `Pkg.Revision`）、SDK platform、build-tools、cmdline-tools、JDK、CMake、Ninja、MinGW（`official` 模式标注未安装）、Python、Perl、7-Zip；
 4. **运行环境**：runner 名称/OS/架构、镜像版本、CPU 型号与逻辑核数、内存、`GITHUB_WORKSPACE`、`WORK_ROOT`；
 5. **时间**：UTC 生成时间 + `T_FETCH`/`T_HOST_*`/`T_GRADLE_PREP`/`T_TARGET_*` 各阶段秒数与分钟数；
-6. **产物自检**：`qmake -query QT_VERSION`、`moc --version`、`qsb --version`、`qtpaths -query QT_VERSION`、`androiddeployqt --help` 前 5 行。
+6. **产物自检**：`qmake -query QT_VERSION`、`moc --version`、`qsb --version`、`qtpaths -query QT_VERSION`、`androiddeployqt --help` 前 5 行，以及 `plugins/imageformats` 下实际插件清单与各自体积（用于核对 png/jpeg/webp/svg/ico/gif 的保留结果）。
 
 编码为 **UTF-8 with BOM**（Windows PowerShell 的 `Set-Content -Encoding utf8`），避免记事本把中文当 ANSI 显示；文件首行也标注了编码。
 
@@ -598,8 +629,9 @@ Qt 6.12 里 Android 的 `Qt6Android.jar` 由源码树内的 Gradle 工程构建�
 - 补丁版场景：`auto` 依赖官方索引已收录该版本；若填入的是尚未发布/商业 LTS 专属的版本，会在探测（`auto`→build）与源码下载处失败，错误信息会指出是“索引 404”还是“源码两处地址都不可用”。
 - artifact 为未签名的 Qt 前缀，不含 APK，不含 Android 签名材料。
 - artifact 中的 host 前缀已裁剪（`lib\*.a`、`sbom\`、未引用的桌面 exe、`include\`、`doc\`），1,472 MB → 285.1 MB（7z 后 60 MB），只够交叉编译与 `androiddeployqt` 部署；需要桌面 Qt 开发能力时不要用它。
-- 默认 `skip_modules` 关闭 `qtgrpc`/`qtserialbus`/`qtscxml`/`qtopcua`/`qtremoteobjects`/`qtactiveqt`/`qtwayland`/`qttasktree`/`qtcoap`/`qtwebchannel` 与 PrintSupport/SpatialAudio；需要其中任一功能时，从默认值里删掉对应 token 重跑（host 侧会随 `auto` 自动把所需模块加回）。
-- `build` 模式的 host 白名单有 13 个模块，按默认 `skip_modules` 过滤后实际编 9 个（`qtbase`/`qtsvg`/`qtdeclarative`/`qtshadertools`/`qttools`/`qtquick3d`/`qtquick3dphysics`/`qtquicktimeline`/`qtlottie`）；工程用到白名单外的模块工具时 configure 会失败，需加进 `host_modules` 或用 `official`。
+- 默认 `skip_modules` 关闭 `qtgrpc`/`qtserialbus`/`qtscxml`/`qtopcua`/`qtremoteobjects`/`qtactiveqt`/`qtwayland`/`qttasktree`/`qtcoap`/`qtwebchannel`、PrintSupport/SpatialAudio，以及 TIFF 图像格式（保留 png/jpeg/webp/svg/ico/gif）；需要其中任一功能时，从默认值里删掉对应 token 重跑（host 侧会随 `auto` 自动把所需模块加回）。
+- 图像格式的残留：`bmp`/`ppm`/`xbm`/`xpm` 内建在 QtGui，`tga`/`wbmp`/`icns` 插件没有独立 feature，这 7 个无法用 configure 关闭；只有靠改 qtimageformats 源码（删 `add_subdirectory(tga|wbmp|icns)`）才能去掉，默认不做源码补丁。详见「图像格式」。
+- `build` 模式的 host 白名单有 14 个模块，按默认 `skip_modules` 过滤后实际编 10 个（`qtbase`/`qtsvg`/`qtdeclarative`/`qtshadertools`/`qttools`/`qtquick3d`/`qtquick3dphysics`/`qtquicktimeline`/`qtlottie`/`qtcanvaspainter`）；工程用到白名单外的模块工具时 configure 会失败，需加进 `host_modules` 或用 `official`。
 - `host_linkage=static` **未经 CI 验证**：本机只验证了 MinGW `gcc -static` 可用，未编译 Qt。首轮需设 `host_mode=build`、`host_linkage=static`、`host_modules=auto`，确认 host configure 无报错、10 项工具冒烟通过、target configure 能解析 `Qt6*Tools`，并实测前缀体积与 `T_HOST_*` 耗时；失败则保持默认 `shared`。
 - `qtgrpc` 的 host 工具依赖宿主 `protoc`（`Qt6GrpcToolsDependencies.cmake:7` 的 `WrapProtoc`，官方 Qt 包内不含）；默认已 `-skip qtgrpc`，不会触发。若从 `skip_modules` 移除 `qtgrpc`，需在工作流安装 protobuf，否则工程 `find_package(Qt6 COMPONENTS Grpc)` 会失败（**未在 CI 实测**）。
 
