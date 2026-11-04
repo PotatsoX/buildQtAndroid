@@ -10,6 +10,8 @@ $ProgressIntervalSec = 30
 
 $majorMinor = ($Version -split '\.')[0..1] -join '.'
 $baseUrl = "https://download.qt.io/official_releases/qt/$majorMinor/$Version"
+# 更早的补丁版会从 official_releases 迁到 archive，两处都试
+$archiveUrl = "https://download.qt.io/archive/qt/$majorMinor/$Version"
 $archiveName = "qt-everywhere-src-$Version.zip"
 $rootName = "qt-everywhere-src-$Version"
 $archive = Join-Path $ArchiveDir $archiveName
@@ -17,16 +19,24 @@ $root = Join-Path $SrcRoot $rootName
 
 if (-not (Test-Path $archive)) {
     New-Item -ItemType Directory -Force -Path $ArchiveDir | Out-Null
-    $url = "$baseUrl/single/$archiveName"
-    Write-Output "下载源码: $url"
-    curl.exe -L --fail --retry 5 --retry-delay 10 --retry-all-errors -C - --max-time 2400 -o $archive $url
-    if ($LASTEXITCODE -ne 0) { throw "源码下载失败: $url" }
+    $ok = $false
+    foreach ($base in @($baseUrl, $archiveUrl)) {
+        $url = "$base/single/$archiveName"
+        Write-Output "下载源码: $url"
+        curl.exe -L --fail --retry 5 --retry-delay 10 --retry-all-errors -C - --max-time 2400 -o $archive $url
+        if ($LASTEXITCODE -eq 0) { $baseUrl = $base; $ok = $true; break }
+        Write-Warning "下载失败: $url"
+    }
+    if (-not $ok) { throw "源码下载失败: $archiveName（official_releases 与 archive 均不可用）" }
 }
 
 # 官方 md5 校验：取 single/md5sums.txt 里 zip 那一行
 $md5File = Join-Path $ArchiveDir "md5sums-$Version.txt"
 if (-not (Test-Path $md5File)) {
-    curl.exe -L --fail --max-time 120 -o $md5File "$baseUrl/single/md5sums.txt"
+    foreach ($base in @($baseUrl, $archiveUrl)) {
+        curl.exe -L --fail --max-time 120 -o $md5File "$base/single/md5sums.txt"
+        if ($LASTEXITCODE -eq 0) { break }
+    }
 }
 if (Test-Path $md5File) {
     $line = Select-String -Path $md5File -SimpleMatch -Pattern $archiveName | Select-Object -First 1

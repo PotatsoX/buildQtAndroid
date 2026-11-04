@@ -8,9 +8,13 @@ on:
         required: false
         default: "6.12.0"
       skip_modules:
-        description: "传给 configure -skip 的模块（空格分隔；参考项目默认 qtwebengine，可自行加长）"
+        description: "要跳过/关闭的模块与特性（空格或逗号分隔）：模块名走 -skip，以 - 开头的原样传给 configure（如 -no-feature-printsupport）。默认 qtwebengine + 10 个模块 + 2 个 feature"
         required: false
-        default: "qtwebengine"
+        default: "qtwebengine qtgrpc qtserialbus qtscxml qtopcua qtremoteobjects qtactiveqt qtwayland qttasktree qtcoap qtwebchannel -no-feature-printsupport -no-feature-spatialaudio"
+      host_modules:
+        description: "build 模式 host 阶段编译的模块：auto=只编 target 构建要用的工具模块；all=全量（只减去 skip_modules）；或逗号分隔自定义"
+        required: false
+        default: "auto"
       abi:
         description: "目标 ABI（官方 CI 对照行用 armeabi-v7a）"
         required: false
@@ -19,11 +23,28 @@ on:
         options:
           - arm64-v8a
           - armeabi-v7a
+      host_mode:
+        description: "host Qt 来源：auto=先用官方桌面包，缺失则回退源码自建；official=强制官方包；build=强制源码自建"
+        required: false
+        type: choice
+        default: "auto"
+        options:
+          - auto
+          - official
+          - build
       host_only:
         description: "仅构建 host 工具（调试用）"
         required: false
         type: boolean
         default: false
+      host_linkage:
+        description: "build 模式 host 的链接方式：shared=共享（默认，与官方包一致）；static=静态（去 DLL 依赖，未经 CI 验证）"
+        required: false
+        type: choice
+        default: shared
+        options:
+          - shared
+          - static
       runner:
         description: "Runner 标签"
         required: false
@@ -45,14 +66,17 @@ jobs:
     timeout-minutes: 360
     env:
       QT_VERSION: ${{ inputs.qt_version || '6.12.0' }}
-      QT_SKIP_MODULES: ${{ inputs.skip_modules || 'qtwebengine' }}
+      QT_SKIP_MODULES: ${{ inputs.skip_modules || 'qtwebengine qtgrpc qtserialbus qtscxml qtopcua qtremoteobjects qtactiveqt qtwayland qttasktree qtcoap qtwebchannel -no-feature-printsupport -no-feature-spatialaudio' }}
+      HOST_MODULES: ${{ inputs.host_modules || 'auto' }}
       HOST_ONLY: ${{ inputs.host_only || 'false' }}
+      HOST_MODE_INPUT: ${{ inputs.host_mode || 'auto' }}
+      HOST_LINKAGE: ${{ inputs.host_linkage || 'shared' }}
       QT_ABI: ${{ inputs.abi || 'arm64-v8a' }}
       WORK_ROOT: D:\qt
       SRC_ROOT: D:\qt\src
       ARCHIVE_DIR: D:\qt\archives
-      HOST_BUILD_DIR: D:\qt\host-build
       HOST_PREFIX: D:\qt\host
+      HOST_BUILD_DIR: D:\qt\host-build
       TARGET_BUILD_DIR: D:\qt\target-build
       TARGET_PREFIX: D:\qt\android_${{ inputs.abi || 'arm64-v8a' }}
       TOOLS_DIR: C:\tools
@@ -62,8 +86,8 @@ jobs:
       SDK_PLATFORM: android-37.0
       SDK_BUILD_TOOLS: 37.0.0
       CMDLINE_TOOLS_VERSION: "19.0"
-      MINGW_VERSION: 15.1.0
       CMAKE_VERSION: 4.3.2
+      MINGW_VERSION: 15.1.0
       NINJA_VERSION: 1.10.2
       PERL_VERSION: 5.42.2.1
 
@@ -99,27 +123,25 @@ jobs:
           $key = ($env:QT_SKIP_MODULES -replace '[, ]+', '-').ToLowerInvariant()
           if (-not $key) { $key = 'none' }
           "SKIP_KEY=$key" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          # host 前缀缓存必须区分 host 模块集，否则旧的全量缓存会掩盖最小集的配置错误
+          $hostKey = ($env:HOST_MODULES -replace '[^A-Za-z0-9]+', '-').Trim('-').ToLowerInvariant()
+          if (-not $hostKey) { $hostKey = 'auto' }
+          "HOST_SET_KEY=$hostKey" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Cache Android SDK / NDK
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: C:\android
           key: android-${{ env.NDK_VERSION }}-${{ env.SDK_PLATFORM }}-${{ env.SDK_BUILD_TOOLS }}-${{ env.CMDLINE_TOOLS_VERSION }}-v1
 
       - name: Cache Qt source archive
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: D:\qt\archives
           key: qt-src-zip-${{ env.QT_VERSION }}-v1
 
-      - name: Cache host Qt prefix
-        uses: actions/cache@v4
-        with:
-          path: D:\qt\host
-          key: qt-host-${{ env.QT_VERSION }}-${{ env.SKIP_KEY }}-mingw${{ env.MINGW_VERSION }}-cmake${{ env.CMAKE_VERSION }}-v1
-
       - name: Setup JDK 21.0.9
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "21.0.9"
@@ -131,7 +153,7 @@ jobs:
           python-version: "3.11.9"
           architecture: x64
 
-      - name: Install build tools (MinGW 15.1.0 / CMake 4.3.2 / Ninja 1.10.2 / Strawberry Perl)
+      - name: Install build tools (CMake 4.3.2 / Ninja 1.10.2 / Strawberry Perl)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -146,10 +168,7 @@ jobs:
           Start-Process -Wait -FilePath "$env:TOOLS_DIR\7z-installer.exe" -ArgumentList '/S', "/D=$env:TOOLS_DIR\7zip"
           "SEVEN_ZIP=$env:TOOLS_DIR\7zip\7z.exe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-          # MinGW-w64 15.1.0 (posix-seh, msvcrt)，对应 Qt 6.12 官方 Windows 构建配置
-          Get-File 'https://github.com/niXman/mingw-builds-binaries/releases/download/15.1.0-rt_v12-rev0/x86_64-15.1.0-release-posix-seh-msvcrt-rt_v12-rev0.7z' "$env:TOOLS_DIR\mingw.7z"
-          & "$env:TOOLS_DIR\7zip\7z.exe" x -y "-o$env:TOOLS_DIR" "$env:TOOLS_DIR\mingw.7z"
-          if ($LASTEXITCODE -ne 0) { throw 'MinGW 解压失败' }
+          # official 模式不需要本地编译器：host 工具取自官方预编译包，target 用 NDK clang
 
           # CMake 4.3.2
           Get-File 'https://github.com/Kitware/CMake/releases/download/v4.3.2/cmake-4.3.2-windows-x86_64.zip' "$env:TOOLS_DIR\cmake.zip"
@@ -165,14 +184,12 @@ jobs:
           Expand-Archive "$env:TOOLS_DIR\perl.zip" "$env:TOOLS_DIR\strawberry" -Force
 
           @(
-            "$env:TOOLS_DIR\mingw64\bin",
             "$env:TOOLS_DIR\cmake\bin",
             "$env:TOOLS_DIR\ninja",
             "$env:TOOLS_DIR\strawberry\c\bin",
             "$env:TOOLS_DIR\strawberry\perl\bin"
           ) | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
 
-          & gcc --version
           & cmake --version
           & ninja --version
           & perl --version
@@ -234,30 +251,195 @@ jobs:
             Select-Object Name, @{n='FreeGB'; e={[math]::Round($_.Free / 1GB, 1)}} |
             Format-Table
 
-      - name: Build host Qt tools (MinGW)
+      - name: Resolve host Qt mode
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          $want = $env:QT_VERSION
+          if ($want -notmatch '^\d+\.\d+\.\d+$') { throw "qt_version 必须是 x.y.z：$want" }
+          $mode = $env:HOST_MODE_INPUT.ToLowerInvariant()
+          $short = $want -replace '\.', ''
+          $indexUrl = "https://download.qt.io/online/qtsdkrepository/windows_x86/desktop/qt6_$short/qt6_${short}_mingw/Updates.xml"
+
+          # 探测官方索引：目录名由版本数字拼成（6.12.0 -> qt6_6120），但最终判定必须比对
+          # 包内 Version 的完整版本串（形如 6.12.0-0-202609280346），杜绝前缀/近似命中
+          function Test-OfficialIndex([string]$url, [string]$wantVer, [string]$shortVer) {
+            $tmp = Join-Path $env:RUNNER_TEMP 'qt-host-index.xml'
+            curl.exe -sL --fail --noproxy '*' --max-time 120 -o $tmp $url
+            if ($LASTEXITCODE -ne 0 -or -not (Test-Path $tmp)) {
+              return @{ ok = $false; why = "官方索引不可达（404/网络失败）: $url" }
+            }
+            try { $x = [xml](Get-Content -Raw $tmp) } catch { return @{ ok = $false; why = '官方索引 XML 解析失败' } }
+            $pkgs = $x.Updates.PackageUpdate
+            $main = $pkgs | Where-Object { $_.Name -eq "qt.qt6.$shortVer.win64_mingw" }
+            if (-not $main) { return @{ ok = $false; why = "索引内无 qt.qt6.$shortVer.win64_mingw" } }
+            $ver = ($main.Version -split '-')[0]
+            if ($ver -ne $wantVer) { return @{ ok = $false; why = "索引内该包版本为 $ver，与请求 $wantVer 不一致" } }
+            $archives = [string]$main.DownloadableArchives
+            foreach ($need in @('qtbase-', 'qtdeclarative-', 'qttools-', 'qtsvg-')) {
+              if ($archives -notmatch [regex]::Escape($need)) {
+                return @{ ok = $false; why = "主包缺少模块归档 $need" }
+              }
+            }
+            if (-not ($pkgs | Where-Object { $_.Name -eq "qt.qt6.$shortVer.addons.qtshadertools.win64_mingw" })) {
+              return @{ ok = $false; why = '索引内缺少 qtshadertools addons 包（qsb 必需）' }
+            }
+            return @{ ok = $true; why = "官方 $wantVer Windows 桌面包可用（$($main.Version)）" }
+          }
+
+          if ($mode -eq 'build') {
+            $resolved = 'build'; $reason = 'host_mode=build，按源码自建'
+          } else {
+            $probe = Test-OfficialIndex $indexUrl $want $short
+            if ($probe.ok) {
+              $resolved = 'official'; $reason = $probe.why
+            } elseif ($mode -eq 'official') {
+              throw "host_mode=official 但官方包不可用：$($probe.why)"
+            } else {
+              $resolved = 'build'; $reason = "auto 回退源码自建：$($probe.why)"
+            }
+          }
+          # 官方桌面包是共享构建，无法静态化：显式冲突直接失败，auto 命中时降级为共享并提示
+          if ($resolved -eq 'official' -and $env:HOST_LINKAGE -eq 'static') {
+            if ($mode -eq 'official') {
+              throw 'host_linkage=static 与 host_mode=official 冲突：官方 Windows 桌面包是共享构建'
+            }
+            Write-Warning 'host_linkage=static 仅对 build 模式生效；本次 auto 命中 official，按共享 host 继续'
+            'host_linkage=static 未生效：auto 命中 official（官方包为共享构建）' |
+              Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          }
+          Write-Output "host mode: $resolved（$reason）"
+          "HOST_MODE_RESOLVED=$resolved" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "HOST_MODE_REASON=$reason" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "host Qt 来源: **$resolved**（$reason）" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+      - name: Cache host Qt prefix (build mode)
+        if: env.HOST_MODE_RESOLVED == 'build'
+        uses: actions/cache@v6
+        with:
+          path: D:\qt\host
+          key: qt-host-build-${{ env.QT_VERSION }}-${{ env.SKIP_KEY }}-${{ env.HOST_LINKAGE }}-hostset${{ env.HOST_SET_KEY }}-mingw${{ env.MINGW_VERSION }}-cmake${{ env.CMAKE_VERSION }}-v1
+
+      - name: Install host Qt (official desktop package)
+        if: env.HOST_MODE_RESOLVED == 'official'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # 官方 Windows 桌面包由 MinGW-w64 15.1.0 构建（包内 config_qtbase.summary 实测），
+          # 与 target 构建所需的 host 工具版本一致；仅在 auto 探测命中或显式 official 时执行。
+          # 目录命名由 QT_VERSION 推导：6.12.0 -> qt6_6120 / qt.qt6.6120.*
+          $short = $env:QT_VERSION -replace '\.', ''
+          $repo = "https://download.qt.io/online/qtsdkrepository/windows_x86/desktop/qt6_$short/qt6_${short}_mingw"
+          # qtbase: qmake/moc/rcc/uic/androiddeployqt；qtdeclarative: qmlimportscanner 等
+          # qttools: lrelease/lupdate；qtsvg；addons: qsb/repc/qscxmlc/qtprotoc
+          # MinGW-w64 runtime: host 工具的 libgcc/libstdc++/libwinpthread
+          $packages = @(
+            @{ dir = "qt.qt6.$short.win64_mingw"; archives = @(
+                'qtbase-', 'qtdeclarative-', 'qttools-', 'qtsvg-', 'MinGW-w64-') },
+            @{ dir = "qt.qt6.$short.addons.qtshadertools.win64_mingw"; archives = @('qtshadertools-') },
+            @{ dir = "qt.qt6.$short.addons.qtremoteobjects.win64_mingw"; archives = @('qtremoteobjects-') },
+            @{ dir = "qt.qt6.$short.addons.qtscxml.win64_mingw"; archives = @('qtscxml-') },
+            @{ dir = "qt.qt6.$short.addons.qtgrpc.win64_mingw"; archives = @('qtgrpc-') }
+          )
+          $dl = "$env:WORK_ROOT\host-archives"
+          New-Item -ItemType Directory -Force -Path $dl, $env:HOST_PREFIX | Out-Null
+          $t = [Diagnostics.Stopwatch]::StartNew()
+          foreach ($pkg in $packages) {
+            $listing = curl.exe -sL --fail --noproxy '*' "$repo/$($pkg.dir)/"
+            if ($LASTEXITCODE -ne 0) { throw "读取仓库目录失败: $($pkg.dir)" }
+            foreach ($pattern in $pkg.archives) {
+              $match = [regex]::Match($listing, 'href="([^"]*' + [regex]::Escape($pattern) + '[^"]*\.7z)"')
+              if (-not $match.Success) { throw "仓库中找不到归档 $pattern（包 $($pkg.dir)）" }
+              $file = $match.Groups[1].Value
+              $out = Join-Path $dl $file
+              curl.exe -L --fail --retry 5 --retry-delay 10 --max-time 1800 --noproxy '*' -o $out "$repo/$($pkg.dir)/$file"
+              if ($LASTEXITCODE -ne 0) { throw "下载失败: $file" }
+              # MinGW 运行库要放在 bin 下：Windows 只在 exe 同目录与 PATH 里找 DLL，前缀根目录放不进搜索路径
+              $dest = if ($pattern -eq 'MinGW-w64-') { Join-Path $env:HOST_PREFIX 'bin' } else { $env:HOST_PREFIX }
+              New-Item -ItemType Directory -Force -Path $dest | Out-Null
+              & $env:SEVEN_ZIP x -y "-o$dest" $out
+              if ($LASTEXITCODE -ne 0) { throw "解压失败: $file" }
+            }
+          }
+          $t.Stop()
+          Remove-Item $dl -Recurse -Force -ErrorAction SilentlyContinue
+          # 直接运行一次，确认 host 工具与 MinGW 运行库齐全
+          & "$env:HOST_PREFIX\bin\qmake.exe" -v
+          if ($LASTEXITCODE -ne 0) { throw 'host qmake 无法运行（检查 MinGW runtime 归档是否解压到 bin）' }
+          # 版本一致性硬校验：Qt 自身不比较 host/target 版本串（Qt6HostInfo 用的是
+          # AnyNewerVersion 且 find_package 不传版本），所以这里自己断言
+          $hostVer = (& "$env:HOST_PREFIX\bin\qmake.exe" -query QT_VERSION).Trim()
+          if ($hostVer -ne $env:QT_VERSION) {
+            throw "host Qt 版本 $hostVer 与 target 源码版本 $($env:QT_VERSION) 不一致"
+          }
+          "T_HOST_INSTALL={0:N1}" -f $t.Elapsed.TotalSeconds | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Build host Qt tools (source, build mode)
+        if: env.HOST_MODE_RESOLVED == 'build'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $src = Join-Path $env:SRC_ROOT "qt-everywhere-src-$env:QT_VERSION"
+          # -no-feature-* 之类的原始参数只交给 target configure，不参与模块集合计算
+          $targetSkips = @($env:QT_SKIP_MODULES -split '[\s,]+' | Where-Object { $_ -and -not $_.StartsWith('-') })
+          $allModules = @(Get-ChildItem $src -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'CMakeLists.txt') } | ForEach-Object Name)
+          if ($env:HOST_MODULES -eq 'all') {
+            $keep = @($allModules | Where-Object { $_ -notin $targetSkips })
+          } else {
+            # auto = 白名单 ∩ target 实际构建的模块：target 跳过的模块不会调用其工具
+            $keep = if ($env:HOST_MODULES -eq 'auto') {
+              @('qtbase', 'qtsvg', 'qtdeclarative', 'qtshadertools', 'qttools', 'qtscxml',
+                'qtremoteobjects', 'qtgrpc', 'qtquick3d', 'qtquick3dphysics', 'qtquicktimeline',
+                'qtopcua', 'qtlottie') | Where-Object { $_ -notin $targetSkips }
+            } else {
+              @($env:HOST_MODULES -split '[\s,]+' | Where-Object { $_ })
+            }
+            $unknown = @($keep | Where-Object { $_ -notin $allModules })
+            if ($unknown.Count -gt 0) { throw "host_modules 含未知模块：$($unknown -join ', ')" }
+            if ($keep -notcontains 'qtbase') { throw 'host_modules 必须包含 qtbase' }
+          }
+          $hostSkips = @($allModules | Where-Object { $_ -notin $keep })
+          # BUILD-INFO.txt 需要生效集合，缓存命中时也要有
+          "HOST_KEEP_MODULES={0}" -f (($keep | Sort-Object) -join ',') | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Output ("host 编译模块（{0}）：{1}" -f $env:HOST_MODULES, (($keep | Sort-Object) -join ', '))
+          Write-Output ("host 跳过模块：{0}" -f (($hostSkips | Sort-Object) -join ', '))
+
+          $markerId = "build:$env:HOST_LINKAGE`:$env:HOST_SET_KEY"
           $marker = Join-Path $env:HOST_PREFIX '.cache-ok'
-          if (Test-Path $marker) {
-            Write-Output "host prefix 命中缓存，跳过 host 构建"
+          if ((Test-Path $marker) -and ((Get-Content $marker -Raw).Trim() -eq $markerId)) {
+            Write-Output 'host 前缀命中 build 缓存，跳过 host 构建'
             exit 0
           }
-          $src = Join-Path $env:SRC_ROOT "qt-everywhere-src-$env:QT_VERSION"
+
+          # build 模式才需要 MinGW 编译器（official 模式不下这个包，省约 1 分钟）
+          function Get-File([string]$Url, [string]$Out) {
+            curl.exe -L --fail --retry 5 --retry-delay 10 --max-time 1800 --noproxy '*' -o $Out $Url
+            if ($LASTEXITCODE -ne 0) { throw "下载失败: $Url" }
+          }
+          Get-File 'https://github.com/niXman/mingw-builds-binaries/releases/download/15.1.0-rt_v12-rev0/x86_64-15.1.0-release-posix-seh-msvcrt-rt_v12-rev0.7z' "$env:TOOLS_DIR\mingw.7z"
+          & $env:SEVEN_ZIP x -y "-o$env:TOOLS_DIR" "$env:TOOLS_DIR\mingw.7z"
+          if ($LASTEXITCODE -ne 0) { throw 'MinGW 解压失败' }
+          $env:PATH = "$env:TOOLS_DIR\mingw64\bin;$env:PATH"
+          & gcc --version
+
+          New-Item -ItemType Directory -Force -Path $env:HOST_PREFIX | Out-Null
           Remove-Item $env:HOST_BUILD_DIR -Recurse -Force -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Force -Path $env:HOST_BUILD_DIR | Out-Null
           Push-Location $env:HOST_BUILD_DIR
           $t = [Diagnostics.Stopwatch]::StartNew()
           try {
-            # 默认参数基线: 参考项目 yuanpeirong/buildQt buildQt6/build-Qt6mingw64.cmd:33
             $skipArgs = @()
-            foreach ($m in ($env:QT_SKIP_MODULES -split '[\s,]+' | Where-Object { $_ })) { $skipArgs += @('-skip', $m) }
-            & "$src\configure.bat" -prefix $env:HOST_PREFIX -release -opensource -confirm-license `
-              -nomake examples -nomake tests -no-openssl -platform win32-g++ `
-              -qt-zlib -qt-libpng -qt-libjpeg -qt-freetype -qt-harfbuzz -schannel `
-              -no-feature-sql-psql -no-feature-sql-mysql -no-feature-sql-odbc -no-feature-sql-oci `
-              -no-feature-sql-db2 -no-feature-sql-ibase -no-feature-sql-mimer -no-feature-cups `
-              @skipArgs
+            foreach ($m in $hostSkips) { $skipArgs += @('-skip', $m) }
+            # static 只用于验证自包含/去 DLL 依赖：Qt 文档建议 target 为 shared 时 host 不要 static，且 MinGW 静态不在官方 CI
+            $linkArgs = if ($env:HOST_LINKAGE -eq 'static') { @('-static', '-static-runtime', '-DFEATURE_relocatable=ON') } else { @() }
+            $cfgArgs = @('-prefix', $env:HOST_PREFIX, '-release', '-opensource', '-confirm-license',
+              '-nomake', 'examples', '-nomake', 'tests', '-no-openssl', '-platform', 'win32-g++',
+              '-qt-zlib', '-qt-libpng', '-qt-libjpeg', '-qt-freetype', '-qt-harfbuzz', '-schannel',
+              '-no-feature-sql-psql', '-no-feature-sql-mysql', '-no-feature-sql-odbc', '-no-feature-sql-oci',
+              '-no-feature-sql-db2', '-no-feature-sql-ibase', '-no-feature-sql-mimer', '-no-feature-cups') + $linkArgs + $skipArgs
+            $cfgLine = '"' + "$src\configure.bat" + '" ' + (($cfgArgs | ForEach-Object { if ($_ -match '\s') { "'$_'" } else { $_ } }) -join ' ')
+            Set-Content -Path "$env:WORK_ROOT\host-configure.txt" -Value $cfgLine -Encoding utf8
+            & "$src\configure.bat" @cfgArgs
             if ($LASTEXITCODE -ne 0) { throw "host configure 失败: $LASTEXITCODE" }
             $t.Stop(); "T_HOST_CONFIGURE={0:N1}" -f $t.Elapsed.TotalSeconds | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
             $t.Restart()
@@ -271,12 +453,12 @@ jobs:
           } finally {
             Pop-Location
           }
-          New-Item -ItemType File -Force -Path $marker | Out-Null
+          Set-Content -Path $marker -Value $markerId -Encoding utf8
           Remove-Item $env:HOST_BUILD_DIR -Recurse -Force -ErrorAction SilentlyContinue
 
       - name: Cache Gradle home
         if: env.HOST_ONLY != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           # Qt 构建期 Gradle 的缓存（wrapper 分发包 + Maven 依赖）
           path: |
@@ -360,18 +542,23 @@ jobs:
           $t = [Diagnostics.Stopwatch]::StartNew()
           try {
             $skipArgs = @()
-            foreach ($m in ($env:QT_SKIP_MODULES -split '[\s,]+' | Where-Object { $_ })) { $skipArgs += @('-skip', $m) }
-            & "$src\configure.bat" -prefix $env:TARGET_PREFIX -release -opensource -confirm-license `
-              -nomake examples -nomake tests -no-openssl `
-              -qt-host-path $env:HOST_PREFIX `
-              -android-abis $env:QT_ABI `
-              -android-sdk $env:ANDROID_SDK_ROOT `
-              -android-ndk $env:ANDROID_NDK_ROOT `
-              -android-javac-source 17 -android-javac-target 17 `
-              -no-feature-sql-psql -no-feature-sql-mysql -no-feature-sql-odbc -no-feature-sql-oci `
-              -no-feature-sql-db2 -no-feature-sql-ibase -no-feature-sql-mimer `
-              -no-feature-cups -no-feature-pkg-config `
-              @skipArgs
+            foreach ($m in ($env:QT_SKIP_MODULES -split '[\s,]+' | Where-Object { $_ })) {
+              # 以 - 开头的是 configure 原始参数（如 -no-feature-printsupport），其余按 -skip 模块处理
+              if ($m.StartsWith('-')) { $skipArgs += $m } else { $skipArgs += @('-skip', $m) }
+            }
+            $cfgArgs = @('-prefix', $env:TARGET_PREFIX, '-release', '-opensource', '-confirm-license',
+              '-nomake', 'examples', '-nomake', 'tests', '-no-openssl',
+              '-qt-host-path', $env:HOST_PREFIX,
+              '-android-abis', $env:QT_ABI,
+              '-android-sdk', $env:ANDROID_SDK_ROOT,
+              '-android-ndk', $env:ANDROID_NDK_ROOT,
+              '-android-javac-source', '17', '-android-javac-target', '17',
+              '-no-feature-sql-psql', '-no-feature-sql-mysql', '-no-feature-sql-odbc', '-no-feature-sql-oci',
+              '-no-feature-sql-db2', '-no-feature-sql-ibase', '-no-feature-sql-mimer',
+              '-no-feature-cups', '-no-feature-pkg-config') + $skipArgs
+            $cfgLine = '"' + "$src\configure.bat" + '" ' + (($cfgArgs | ForEach-Object { if ($_ -match '\s') { "'$_'" } else { $_ } }) -join ' ')
+            Set-Content -Path "$env:WORK_ROOT\target-configure.txt" -Value $cfgLine -Encoding utf8
+            & "$src\configure.bat" @cfgArgs
             if ($LASTEXITCODE -ne 0) { throw "target configure 失败: $LASTEXITCODE" }
             $t.Stop(); "T_TARGET_CONFIGURE={0:N1}" -f $t.Elapsed.TotalSeconds | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
             Write-Output '--- 磁盘(target configure 后) ---'
@@ -410,20 +597,172 @@ jobs:
             --qt-version "$env:QT_VERSION" `
             --out "$env:WORK_ROOT\manifest.json"
 
+      - name: Prune host prefix (artifact slimming)
+        if: env.HOST_ONLY != 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # 只裁 host 前缀，target 前缀结构完全不动（交叉编译与 androiddeployqt 都依赖它）
+          # 判据：被 lib/cmake 下 Qt6*Targets*.cmake 引用的 exe 一律保留——导入目标指向的文件缺失时
+          # find_package 会报 "The imported target ... references the file ... but this file does not exist"
+          $before = (Get-ChildItem $env:HOST_PREFIX -Recurse -File | Measure-Object Length -Sum).Sum
+          # 静态导入库只留 libQt6EntryPoint.a（Qt6EntryPointPrivate 的导入目标指向它，缺了 Windows 侧 configure 直接失败）
+          # host_linkage=static 时 lib/*.a 是实际静态库而非导入库；交叉编译只消费 bin 下的工具，同样删除
+          $entryPoint = "$env:HOST_PREFIX\lib\libQt6EntryPoint.a"
+          $hasEntryPoint = Test-Path $entryPoint
+          if ($hasEntryPoint) { Move-Item $entryPoint "$env:HOST_PREFIX\lib\libQt6EntryPoint.keep" -Force }
+          Remove-Item "$env:HOST_PREFIX\lib\*.a" -Force -ErrorAction SilentlyContinue
+          if ($hasEntryPoint) { Move-Item "$env:HOST_PREFIX\lib\libQt6EntryPoint.keep" $entryPoint -Force }
+          Remove-Item "$env:HOST_PREFIX\sbom" -Recurse -Force -ErrorAction SilentlyContinue
+          # include/doc 只服务桌面开发与文档：交叉编译读 target 前缀的头文件，host 库导入目标在删 .a 后不可链接
+          foreach ($d in @('include', 'doc')) {
+            Remove-Item (Join-Path $env:HOST_PREFIX $d) -Recurse -Force -ErrorAction SilentlyContinue
+          }
+
+          $referenced = New-Object 'System.Collections.Generic.HashSet[string]'
+          foreach ($f in Get-ChildItem "$env:HOST_PREFIX\lib\cmake" -Recurse -Filter *Targets*.cmake) {
+            foreach ($m in [regex]::Matches((Get-Content $f.FullName -Raw), '(?<=bin/)[A-Za-z0-9_.+-]+\.exe')) {
+              [void]$referenced.Add($m.Value.ToLowerInvariant())
+            }
+          }
+          # 桌面开发工具：只删 cmake 未引用的，其余（qdoc/qhelpgenerator/qmlformat 等）保留
+          $candidates = @('designer.exe', 'assistant.exe', 'linguist.exe', 'qmlls.exe', 'qml.exe',
+            'qmlscene.exe', 'qtdiag.exe', 'qtdiag6.exe', 'pixeltool.exe', 'qdbus.exe', 'qdbusviewer.exe',
+            'qdistancefieldgenerator.exe', 'qmleasing.exe', 'qtplugininfo.exe')
+          $deleted = @()
+          foreach ($name in $candidates) {
+            $path = Join-Path "$env:HOST_PREFIX\bin" $name
+            if ((Test-Path $path) -and -not $referenced.Contains($name)) {
+              Remove-Item $path -Force
+              $deleted += $name
+            }
+          }
+          Write-Output ("cmake 引用的 exe: {0} 个；删除的开发工具: {1}" -f $referenced.Count, ($deleted -join ', '))
+          $missing = @($referenced | Where-Object { -not (Test-Path (Join-Path "$env:HOST_PREFIX\bin" $_)) })
+          if ($missing.Count -gt 0) { throw "精简后缺少 cmake 引用的 exe：$($missing -join ', ')" }
+          $after = (Get-ChildItem $env:HOST_PREFIX -Recurse -File | Measure-Object Length -Sum).Sum
+          $msg = "host 前缀精简: {0:N0} MB -> {1:N0} MB（省 {2:N0} MB）" -f ($before / 1MB), ($after / 1MB), (($before - $after) / 1MB)
+          Write-Output $msg
+          $msg | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+          # 精简后自检：缺 DLL 时 Windows 返回 0xC0000135 / 0xC0000139
+          $smoke = @(
+            @('qmake.exe', '-query', 'QT_VERSION'), @('moc.exe', '--version'), @('rcc.exe', '--help'),
+            @('uic.exe', '--help'), @('qsb.exe', '--version'), @('qmltyperegistrar.exe', '--help'),
+            @('qmlcachegen.exe', '--help'), @('qmlimportscanner.exe'), @('androiddeployqt.exe', '--help'),
+            @('qtpaths.exe', '-query', 'QT_VERSION')
+          )
+          foreach ($cmd in $smoke) {
+            $exe = Join-Path $env:HOST_PREFIX "bin\$($cmd[0])"
+            & $exe @($cmd[1..($cmd.Count - 1)]) 2>&1 | Out-Null
+            if ($LASTEXITCODE -in @(-1073741515, -1073741511)) { throw "精简后 $($cmd[0]) 无法运行（缺运行库 DLL）" }
+          }
+
+      - name: Write BUILD-INFO.txt
+        if: env.HOST_ONLY != 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Get-Text([string]$Path) {
+            if (Test-Path $Path) { (Get-Content $Path -Raw).TrimStart([char]0xFEFF).Trim() } else { 'n/a（未执行/未记录）' }
+          }
+          function Get-Cmd([string]$Exe, [string[]]$Argv) {
+            try { (& $Exe @Argv 2>&1 | Out-String).Trim() } catch { "执行失败: $($_.Exception.Message)" }
+          }
+          $now = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss') + ' UTC'
+          $os = Get-CimInstance Win32_OperatingSystem
+          $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
+          $ndkProps = Join-Path $env:ANDROID_NDK_ROOT 'source.properties'
+          $ndkRev = if (Test-Path $ndkProps) { (Select-String -Path $ndkProps -Pattern '^Pkg.Revision' | Select-Object -First 1).Line } else { 'n/a' }
+          $hostMode = if ($env:HOST_MODE_RESOLVED -eq 'official') { 'official（官方预编译桌面包）' } else { "build（源码自建，链接方式 $env:HOST_LINKAGE）" }
+          $hostModules = if ($env:HOST_MODE_RESOLVED -eq 'official') { 'n/a（官方完整桌面包）' } else { $env:HOST_KEEP_MODULES }
+          $hostCfg = if ($env:HOST_MODE_RESOLVED -eq 'official') { 'n/a（official 模式不运行 host configure）' } else { Get-Text "$env:WORK_ROOT\host-configure.txt" }
+          $mingw = if ($env:HOST_MODE_RESOLVED -eq 'official') { '未安装（official 复用官方包）' } else { Get-Cmd 'gcc' @('--version') }
+          $phase = {
+            param($key, $label)
+            $v = [Environment]::GetEnvironmentVariable($key)
+            if ($v) { "{0}: {1:N1} 分钟（{2} 秒）" -f $label, ([double]$v / 60), $v } else { "{0}: 未记录" -f $label }
+          }
+          $adqHelp = (Get-Cmd "$env:HOST_PREFIX\bin\androiddeployqt.exe" @('--help')) -split "`n" | Select-Object -First 5
+          $lines = @(
+            'Qt for Android 构建环境与参数',
+            '编码: UTF-8 with BOM（Windows 记事本可直接打开）',
+            "生成时间: $now",
+            "工作流: $env:GITHUB_WORKFLOW / run $env:GITHUB_RUN_NUMBER / $env:GITHUB_SHA",
+            '',
+            '[Qt]',
+            "版本: $env:QT_VERSION",
+            "ABI: $env:QT_ABI",
+            "host 来源: $hostMode",
+            "skip 项: $env:QT_SKIP_MODULES",
+            "host 生效模块: $hostModules",
+            '',
+            '[configure 命令]',
+            "host: $hostCfg",
+            "target: $(Get-Text "$env:WORK_ROOT\target-configure.txt")",
+            '',
+            '[工具链]',
+            "NDK: $env:NDK_VERSION（$ndkRev）",
+            "SDK platform: $env:SDK_PLATFORM",
+            "build-tools: $env:SDK_BUILD_TOOLS",
+            "cmdline-tools: $env:CMDLINE_TOOLS_VERSION",
+            "JDK: $(Get-Cmd 'java' @('-version'))",
+            "CMake: $(Get-Cmd 'cmake' @('--version'))",
+            "Ninja: $(Get-Cmd 'ninja' @('--version'))",
+            "MinGW: $mingw",
+            "Python: $(Get-Cmd 'python' @('--version'))",
+            "Perl: $(Get-Cmd 'perl' @('-e', 'print $^V'))",
+            "7-Zip: $(Get-Cmd $env:SEVEN_ZIP @('i'))",
+            '',
+            '[运行环境]',
+            "runner: $env:RUNNER_NAME（$env:RUNNER_OS/$env:RUNNER_ARCH）",
+            "OS: $($os.Caption) $($os.Version)（ImageOS=$env:ImageOS, ImageVersion=$env:ImageVersion）",
+            "CPU: $($cpu.Name) / $env:NUMBER_OF_PROCESSORS 逻辑核",
+            "内存: $([math]::Round($os.TotalVisibleMemorySize / 1MB, 1)) GB",
+            "GITHUB_WORKSPACE: $env:GITHUB_WORKSPACE",
+            "WORK_ROOT: $env:WORK_ROOT",
+            '',
+            '[阶段耗时]',
+            (& $phase 'T_FETCH' '源码下载+解压'),
+            (& $phase 'T_HOST_CONFIGURE' 'host configure（仅 build）'),
+            (& $phase 'T_HOST_BUILD' 'host build（仅 build）'),
+            (& $phase 'T_HOST_INSTALL' 'host 安装/官方包解压'),
+            (& $phase 'T_GRADLE_PREP' 'Gradle 缓存准备'),
+            (& $phase 'T_TARGET_CONFIGURE' 'target configure'),
+            (& $phase 'T_TARGET_BUILD' 'target build'),
+            (& $phase 'T_TARGET_INSTALL' 'target install'),
+            '',
+            '[产物自检]',
+            "qmake -query QT_VERSION: $(Get-Cmd "$env:HOST_PREFIX\bin\qmake.exe" @('-query', 'QT_VERSION'))",
+            "moc --version: $(Get-Cmd "$env:HOST_PREFIX\bin\moc.exe" @('--version'))",
+            "qsb --version: $(Get-Cmd "$env:HOST_PREFIX\bin\qsb.exe" @('--version'))",
+            "qtpaths -query QT_VERSION: $(Get-Cmd "$env:HOST_PREFIX\bin\qtpaths.exe" @('-query', 'QT_VERSION'))",
+            'androiddeployqt --help（前 5 行）:'
+          ) + @($adqHelp)
+          # Set-Content -Encoding utf8 在 Windows PowerShell 下写 UTF-8 with BOM
+          Set-Content -Path "$env:WORK_ROOT\BUILD-INFO.txt" -Value $lines -Encoding utf8
+          Write-Output "已生成 BUILD-INFO.txt（$(($lines | Measure-Object).Count) 行）"
+
       - name: Package artifact
         if: env.HOST_ONLY != 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          Get-ChildItem $env:TARGET_PREFIX | Select-Object Name, Length | Format-Table
+          # 同时打包 target 前缀、host 前缀与 BUILD-INFO.txt：target/bin/target_qt.conf 的 HostPrefix 是相对路径
+          # （qtbase/cmake/QtQmakeHelpers.cmake:108），两个目录保持同级即可继续解析到 host 工具
+          foreach ($dir in @($env:TARGET_PREFIX, $env:HOST_PREFIX)) {
+            $size = (Get-ChildItem $dir -Recurse -File | Measure-Object Length -Sum).Sum
+            "{0}: {1:N0} MB" -f $dir, ($size / 1MB)
+          }
           $archive = "$env:WORK_ROOT\qt-$env:QT_VERSION-android-$env:QT_ABI-windows-host.7z"
           Push-Location $env:WORK_ROOT
           try {
-            & $env:SEVEN_ZIP a -t7z -mx=9 $archive (Split-Path $env:TARGET_PREFIX -Leaf)
+            & $env:SEVEN_ZIP a -t7z -mx=5 $archive 'BUILD-INFO.txt' (Split-Path $env:TARGET_PREFIX -Leaf) (Split-Path $env:HOST_PREFIX -Leaf)
             if ($LASTEXITCODE -ne 0) { throw '7z 打包失败' }
           } finally {
             Pop-Location
           }
+          "{0:N0} MB" -f ((Get-Item $archive).Length / 1MB)
           Get-PSDrive -PSProvider FileSystem |
             Select-Object Name, @{n='FreeGB'; e={[math]::Round($_.Free / 1GB, 1)}} |
             Format-Table
@@ -441,7 +780,7 @@ jobs:
 
       - name: Publish release (tag only)
         if: startsWith(github.ref, 'refs/tags/') && env.HOST_ONLY != 'true'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: D:\qt\qt-${{ env.QT_VERSION }}-android-${{ env.QT_ABI }}-windows-host.7z
 
@@ -462,13 +801,16 @@ jobs:
             "SDK platform: $env:SDK_PLATFORM",
             "Build tools: $env:SDK_BUILD_TOOLS",
             "Host prefix: $env:HOST_PREFIX",
+            "Host 来源: $env:HOST_MODE_RESOLVED（$env:HOST_MODE_REASON）",
+            "Host 链接: $env:HOST_LINKAGE",
+            "Host 生效模块: $env:HOST_KEEP_MODULES（official 模式为空）",
             "Target prefix: $env:TARGET_PREFIX",
             "",
             "## 阶段耗时",
             (& $fmt 'T_FETCH' '源码下载+解压'),
-            (& $fmt 'T_HOST_CONFIGURE' 'host configure'),
-            (& $fmt 'T_HOST_BUILD' 'host build'),
-            (& $fmt 'T_HOST_INSTALL' 'host install'),
+            (& $fmt 'T_HOST_CONFIGURE' 'host configure（仅 build 模式）'),
+            (& $fmt 'T_HOST_BUILD' 'host build（仅 build 模式）'),
+            (& $fmt 'T_HOST_INSTALL' 'host 安装/官方包解压'),
             (& $fmt 'T_GRADLE_PREP' 'Gradle 缓存准备'),
             (& $fmt 'T_TARGET_CONFIGURE' 'target configure'),
             (& $fmt 'T_TARGET_BUILD' 'target build'),

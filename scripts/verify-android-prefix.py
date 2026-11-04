@@ -163,6 +163,16 @@ def main():
     if "moc.exe" not in host_tools:
         errors.append("host 前缀缺少 moc.exe")
 
+    # 交叉编译必需的 host 信息包（qtbase/cmake/QtPostProcessHelpers.cmake 的 qt_create_hostinfo_package）
+    if not (host / "lib" / "cmake" / "Qt6HostInfo" / "Qt6HostInfoConfig.cmake").exists():
+        errors.append("host 前缀缺少 lib/cmake/Qt6HostInfo（交叉编译必需）")
+
+    # androiddeployqt 打包 APK 的运行期依赖：Qt6Android.jar 与 Gradle wrapper（均在 target 前缀内）
+    if not (prefix / "jar" / "Qt6Android.jar").exists():
+        errors.append("缺少 jar/Qt6Android.jar（androiddeployqt 必需）")
+    if not (prefix / "src" / "3rdparty" / "gradle" / "gradlew.bat").exists():
+        errors.append("缺少 src/3rdparty/gradle/gradlew.bat（androiddeployqt 必需）")
+
     ndk_props = read_properties(Path(args.ndk) / "source.properties")
     platform_props = read_properties(Path(args.sdk) / "platforms" / "android-37.0" / "source.properties")
     if not platform_props:
