@@ -990,8 +990,13 @@ jobs:
             'lrelease.exe', 'lupdate.exe', 'lconvert.exe', 'cmake_automoc_parser.exe')
           $miss = @($need | Where-Object { -not (Test-Path (Join-Path "$env:HOST_PREFIX\bin" $_)) })
           if ($miss.Count -gt 0) { throw "裁剪后缺少工具：$($miss -join ', ')（可用 host_tools=full 复跑对比）" }
-          & "$env:HOST_PREFIX\bin\androiddeployqt.exe" --help 2>&1 | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw "androiddeployqt --help 失败: $LASTEXITCODE" }
+          # androiddeployqt --help 按设计返回 1（main.cpp 的 SyntaxErrorOrHelpRequested），帮助文本写 stderr
+          # 以 "Syntax: androiddeployqt" 开头；用退出码集合 + 帮助文本共同判定，能证明 exe 与 Qt6Core 依赖齐全
+          $adqOut = (& "$env:HOST_PREFIX\bin\androiddeployqt.exe" --help 2>&1 | Out-String)
+          $adqExit = $LASTEXITCODE
+          if ($adqExit -notin @(0, 1) -or $adqOut -notmatch 'Syntax: androiddeployqt') {
+            throw "androiddeployqt --help 异常: exit=$adqExit, 输出=$($adqOut.Trim())"
+          }
 
           $build = "$env:WORK_ROOT\smoke-build"
           Remove-Item $build -Recurse -Force -ErrorAction SilentlyContinue

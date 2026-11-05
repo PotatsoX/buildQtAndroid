@@ -363,7 +363,7 @@ CI 内的自动校验（`scripts/verify-android-prefix.py`）：
 `Prune host prefix` 之后另有一道 `Smoke host tools (minimal Android project configure)` 步骤：
 
 - 用裁剪后的 host 前缀对最小 Qt Widgets+Quick 工程跑 `cmake` 配置（`-DCMAKE_TOOLCHAIN_FILE=<NDK>/build/cmake/android.toolchain.cmake`、`-DANDROID_ABI=<abi>`、`-DCMAKE_PREFIX_PATH=<target>`、`-DQT_HOST_PATH=<host>`），验证 `find_package(Qt6: Core/Gui/Widgets/Qml/Quick/QuickControls2)` 与 QML 模块解析；
-- 再跑一次 `androiddeployqt --help`；缺工具时直接 `throw` 并点名，日志里出现 `does not exist`/`Could not find` 会作为告警打印。
+- 再跑一次 `androiddeployqt --help`：该工具按设计返回退出码 1（帮助请求与语法错误共用 `SyntaxErrorOrHelpRequested`），帮助文本写到 stderr 且以 `Syntax: androiddeployqt` 开头，所以判定是"退出码 ∈ {0,1} 且输出含该行"；缺工具时直接 `throw` 并点名，日志里出现 `does not exist`/`Could not find` 会作为告警打印。
 
 拿到 7z 后逐条确认 host 前缀可用（解压目录设为 `D:\qt`）：
 
