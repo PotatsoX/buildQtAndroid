@@ -614,10 +614,15 @@ jobs:
               # 以 - 开头的是 configure 原始参数（如 -no-feature-printsupport），其余按 -skip 模块处理
               if ($m.StartsWith('-')) { $skipArgs += $m } else { $skipArgs += @('-skip', $m) }
             }
+            # SSL 只编入 runtime 能力，不链接 OpenSSL：头文件仅用于配置期探测与 backend 插件编译
+            # Qt 的 configure 只把 NAME=VALUE 形式的变量赋值转发给 CMake（QtProcessConfigureArgs.cmake:1096-1100、1474-1476），
+            # -D 前缀不被识别；路径统一用正斜杠，避免反斜杠在 CMake 根路径比较里失效
+            if (-not $env:OPENSSL_HEADERS_ROOT) { throw 'OPENSSL_HEADERS_ROOT 未设置，target 侧找不到 OpenSSL 头文件' }
+            $osslRoot = $env:OPENSSL_HEADERS_ROOT -replace '\\', '/'
             $cfgArgs = @('-prefix', $env:TARGET_PREFIX, '-release', '-opensource', '-confirm-license',
               '-nomake', 'examples', '-nomake', 'tests',
-              # SSL 只编入 runtime 能力，不链接 OpenSSL：头文件仅用于配置期探测与 backend 插件编译
-              '-openssl-runtime', '-DFEATURE_ssl=ON', "-DOPENSSL_ROOT_DIR=$env:OPENSSL_HEADERS_ROOT",
+              '-openssl-runtime',
+              "OPENSSL_ROOT_DIR=$osslRoot", "OPENSSL_INCLUDE_DIR=$osslRoot/include",
               '-qt-host-path', $env:HOST_PREFIX,
               '-android-abis', $env:QT_ABI,
               '-android-sdk', $env:ANDROID_SDK_ROOT,
