@@ -4,7 +4,9 @@ import argparse
 import hashlib
 import io
 import json
+import re
 import struct
+import subprocess
 import sys
 from pathlib import Path
 
@@ -37,6 +39,31 @@ def is_pe(path: Path):
     except OSError:
         return False
     return head == b"MZ"
+
+
+def find_llvm_readelf(ndk: Path):
+    prebuilt = ndk / "toolchains" / "llvm" / "prebuilt"
+    if not prebuilt.is_dir():
+        return None
+    candidates = sorted(prebuilt.glob("*/bin/llvm-readelf*"))
+    return candidates[0] if candidates else None
+
+
+def dynamic_needed(readelf: Path, so: Path):
+    """返回 (NEEDED 列表, 错误详情)；执行器不可用时返回 (None, 详情)。"""
+    try:
+        proc = subprocess.run(
+            [str(readelf), "-d", str(so)],
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, str(exc)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout).strip().splitlines()
+        return None, " | ".join(detail[:3])
+    return re.findall(r"\(NEEDED\)\s+Shared library: \[(.+?)\]", proc.stdout), ""
 
 
 def read_properties(path: Path):
@@ -142,8 +169,15 @@ def main():
     else:
         warnings.append("缺少 bin/target_qt.conf")
 
-    # target 前缀中不应出现 Windows 可执行文件/动态库
-    pe_files = [p.name for p in prefix.rglob("*") if p.is_file() and p.suffix.lower() in (".exe", ".dll")]
+    # target 前缀中不应出现 Windows 可执行文件/动态库；host 若被放进 <target>/host，其 PE 不属于 target 自身
+    host_subtree = prefix / "host"
+    pe_files = []
+    for path in prefix.rglob("*"):
+        if not path.is_file() or path.suffix.lower() not in (".exe", ".dll"):
+            continue
+        if host_subtree != prefix and host_subtree in path.parents:
+            continue
+        pe_files.append(path.name)
 
     # host 前缀必须提供交叉编译所需工具
     host_tools = {}
@@ -172,6 +206,60 @@ def main():
         errors.append("缺少 jar/Qt6Android.jar（androiddeployqt 必需）")
     if not (prefix / "src" / "3rdparty" / "gradle" / "gradlew.bat").exists():
         errors.append("缺少 src/3rdparty/gradle/gradlew.bat（androiddeployqt 必需）")
+
+    # SSL 为 runtime 模式：能力必须编进来，但既不能静态链接也不能动态依赖 OpenSSL
+    net_cfg = prefix / "include" / "QtNetwork" / "qtnetwork-config.h"
+    ssl_feature = None
+    ssl_disabled = False
+    if net_cfg.is_file():
+        cfg_text = net_cfg.read_text(encoding="utf-8", errors="ignore")
+        match = re.search(r"^#define QT_FEATURE_ssl\s+(-?\d+)", cfg_text, re.MULTILINE)
+        ssl_feature = match.group(1) if match else None
+        ssl_disabled = bool(re.search(r"^#define QT_NO_SSL\s+1$", cfg_text, re.MULTILINE))
+        if ssl_feature != "1":
+            errors.append(
+                f"QtNetwork SSL feature not enabled: QT_FEATURE_ssl={ssl_feature} ({net_cfg})"
+            )
+        if ssl_disabled:
+            errors.append(f"QtNetwork compiled without SSL: QT_NO_SSL=1 in {net_cfg}")
+    else:
+        errors.append(f"missing {net_cfg}")
+
+    network_libs = [p for p in so_files if p.name.startswith("libQt6Network")]
+    tls_backend = sorted(prefix.glob("plugins/tls/*openssl*"))
+    if not tls_backend:
+        errors.append("missing plugins/tls/*openssl* backend (runtime SSL not built in)")
+    needed_all = []
+    if not network_libs:
+        errors.append("missing libQt6Network*.so: cannot verify OpenSSL NEEDED entries")
+    else:
+        readelf = find_llvm_readelf(Path(args.ndk))
+        if readelf is None:
+            errors.append("llvm-readelf not found in NDK: cannot verify NEEDED entries")
+        else:
+            for so in network_libs + tls_backend:
+                entries, detail = dynamic_needed(readelf, so)
+                if entries is None:
+                    errors.append(f"llvm-readelf failed on {so.name}: {detail}")
+                    continue
+                needed_all.extend(entries)
+                bad_needed = [e for e in entries if e.startswith(("libssl", "libcrypto"))]
+                if bad_needed:
+                    errors.append(
+                        f"{so.name} links OpenSSL (runtime-only build expected): NEEDED={', '.join(entries)}"
+                    )
+
+    # 前缀内不得分发 TLS 库（下游自备）；host 子树同样不应含 .so
+    tls_libs = [
+        p for p in prefix.rglob("*")
+        if p.is_file() and p.suffix.lower() == ".so"
+        and (p.name.startswith("libssl") or p.name.startswith("libcrypto"))
+    ]
+    if tls_libs:
+        errors.append(
+            "TLS libraries must not be shipped in prefix: "
+            + ", ".join(str(p.relative_to(prefix)) for p in tls_libs[:5])
+        )
 
     ndk_props = read_properties(Path(args.ndk) / "source.properties")
     platform_props = read_properties(Path(args.sdk) / "platforms" / "android-37.0" / "source.properties")
@@ -202,6 +290,10 @@ def main():
         "host_tools": host_tools,
         "target_so_count": len(so_files),
         "target_pe_file_count": len(pe_files),
+        "target_ssl_feature": ssl_feature,
+        "target_ssl_disabled_macro": ssl_disabled,
+        "target_network_needed": sorted(set(needed_all)),
+        "target_tls_lib_count": len(tls_libs),
         "libs": libs,
         "warnings": warnings,
         "errors": errors,
@@ -215,6 +307,11 @@ def main():
     _emit(f"Core libs: {', '.join(p.name for p in core)}")
     _emit(f"Host tools: {json.dumps(host_tools, ensure_ascii=False)}")
     _emit(f"Windows PE files in target prefix: {len(pe_files)}")
+    _emit(
+        f"SSL: QT_FEATURE_ssl={ssl_feature}, QT_NO_SSL={'1' if ssl_disabled else 'absent'}, "
+        f"TLS libs shipped={len(tls_libs)}"
+    )
+    _emit(f"QtNetwork NEEDED: {', '.join(sorted(set(needed_all))) or 'n/a'}")
     for message in warnings:
         _emit(f"WARN: {message}")
     for message in errors:
