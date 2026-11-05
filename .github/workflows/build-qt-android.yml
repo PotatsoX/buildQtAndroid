@@ -859,7 +859,35 @@ jobs:
             if ($txt -ne $orig) { Save $dep $txt }
           }
 
-          # 3) QtBuildInternalsExtra.cmake：原始安装前缀改为相对本文件；源码树路径置空（源码不随包分发）
+          # 3) QtBuildInternalsExtra.cmake：原始安装前缀改为相对本文件；源码树与 OpenSSL 头文件目录置空
+          #    该文件由配置期变量动态生成（QtPostProcessHelpers.cmake:579-788），行号不固定
+          #    OPENSSL_ROOT_DIR 置空而非相对化：包内不分发头文件，且非空值会让下游 FindOpenSSL 走 NO_DEFAULT_PATH
+          #    其余动态注入路径（FFMPEG_DIR、QT_INTERNAL_EXAMPLES_INSTALL_PREFIX、QT_EXTRA_*、RPATH 等）走通用兜底相对化
+          $rootForms = @($root, ($root -replace '\\', '/'))
+          $script:rootAbs = $root -replace '\\', '/'
+          $script:rootPat = '(?i)(' + (($rootForms | ForEach-Object { [regex]::Escape($_) }) -join '|') +
+            ')(?=[/\\"\s'';),]|$)(?<rest>[/\\][^"\s'';)]*)?'
+          function ConvertTo-CmakeRelative([string]$filePath, [string]$text) {
+            $fileDir = $filePath -replace '\\', '/'
+            $fileDir = $fileDir.Substring(0, $fileDir.LastIndexOf('/'))
+            $dirParts = @($fileDir -split '/')
+            $sb = New-Object System.Text.StringBuilder
+            $pos = 0
+            foreach ($m in [regex]::Matches($text, $script:rootPat)) {
+              $absParts = @((($script:rootAbs + $m.Groups['rest'].Value) -replace '\\', '/').TrimEnd('/') -split '/')
+              $n = 0
+              while ($n -lt $dirParts.Count -and $n -lt $absParts.Count -and $dirParts[$n] -ieq $absParts[$n]) { $n++ }
+              $rel = @()
+              for ($k = $n; $k -lt $dirParts.Count; $k++) { $rel += '..' }
+              for ($k = $n; $k -lt $absParts.Count; $k++) { $rel += $absParts[$k] }
+              [void]$sb.Append($text.Substring($pos, $m.Index - $pos))
+              [void]$sb.Append('${CMAKE_CURRENT_LIST_DIR}/' + ($rel -join '/'))
+              $pos = $m.Index + $m.Length
+            }
+            if ($pos -eq 0) { return $text }
+            [void]$sb.Append($text.Substring($pos))
+            return $sb.ToString()
+          }
           foreach ($p in @("$env:TARGET_PREFIX\lib\cmake\Qt6BuildInternals\QtBuildInternalsExtra.cmake",
                            "$env:HOST_PREFIX\lib\cmake\Qt6BuildInternals\QtBuildInternalsExtra.cmake")) {
             if (-not (Test-Path $p)) { continue }
@@ -869,6 +897,9 @@ jobs:
               'set(qtbi_orig_prefix "${CMAKE_CURRENT_LIST_DIR}/../../..")')
             $txt = [regex]::Replace($txt, '(?m)^\s*set\(QT_SOURCE_TREE "[^"]*" CACHE PATH',
               'set(QT_SOURCE_TREE "" CACHE PATH')
+            $txt = [regex]::Replace($txt, '(?m)^\s*set\(OPENSSL_ROOT_DIR "[^"]*" CACHE (STRING|PATH)',
+              'set(OPENSSL_ROOT_DIR "" CACHE $1')
+            $txt = ConvertTo-CmakeRelative $p $txt
             if ($txt -ne $orig) { Save $p $txt }
           }
 
