@@ -232,6 +232,8 @@ jobs:
             $count = (Get-ChildItem $includeDir -Filter *.h -File).Count
             Write-Output "OpenSSL headers: cache hit ($env:OPENSSL_VERSION, $count headers) -> $includeDir"
             "T_OPENSSL_HEADERS=0" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            # 缓存命中时没有跑 Configure，BUILD-INFO 需要如实记录
+            "OPENSSL_CONFIGURE_TARGET=cached" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
             return
           }
           $tmp = "$env:WORK_ROOT\openssl-tmp"
@@ -292,32 +294,49 @@ jobs:
           Write-Output "Perl precheck OK ($($mods.Count) modules): $($mods -join ', ')"
           $precheckSec = [int]$sw.Elapsed.TotalSeconds
 
-          # 4) Configure：选不探测本机编译器的目标，只为产出 configdata.pm 与生成头文件
+          # 4) Configure：Strawberry Perl 是 MSWin32 构建，会给所有 unix build_scheme 的目标（linux-*、mingw64）
+          #    套 Configurations/unix-checker.pm 并直接拒绝；只有 VC 目标走 windows-checker.pm。
+          #    只为产出 configdata.pm 生成头文件、不编译，所以 VC-WIN64A 加 no-asm 免除 nasm 依赖
           $sw.Restart()
           $cfgLog = "$env:WORK_ROOT\openssl-configure.log"
-          Push-Location $srcDir
-          try {
-            $cfgOut = (& perl Configure linux-x86_64 no-shared no-tests 2>&1 | Out-String)
-            $cfgCode = $LASTEXITCODE
-            Set-Content -Path $cfgLog -Value $cfgOut -Encoding utf8
-          } finally {
-            Pop-Location
+          $cfgTarget = $null
+          $cfgOut = ''
+          $attempts = @(
+            [pscustomobject]@{ Name = 'mingw64';           Args = @('mingw64', 'no-shared', 'no-tests') },
+            [pscustomobject]@{ Name = 'VC-WIN64A+no-asm';  Args = @('VC-WIN64A', 'no-shared', 'no-tests', 'no-asm') }
+          )
+          foreach ($a in $attempts) {
+            Push-Location $srcDir
+            try {
+              $out = (& perl Configure @($a.Args) 2>&1 | Out-String)
+              $code = $LASTEXITCODE
+            } finally {
+              Pop-Location
+            }
+            $cfgOut = "$cfgOut`n== target $($a.Name) (exit=$code) ==`n$out"
+            if ($code -eq 0 -and (Test-Path (Join-Path $srcDir 'configdata.pm'))) {
+              $cfgTarget = $a.Name
+              break
+            }
+            Write-Warning "OpenSSL Configure failed for target $($a.Name) (exit=$code), trying next target"
           }
-          if ($cfgCode -ne 0) {
-            $tail = ($cfgOut.Trim() -split "`r?`n" | Select-Object -Last 12) -join "`n"
-            throw "OpenSSL Configure failed (target linux-x86_64).`n$tail`nFull log: $cfgLog"
+          Set-Content -Path $cfgLog -Value $cfgOut -Encoding utf8
+          if (-not $cfgTarget) {
+            $tail = ($cfgOut.Trim() -split "`r?`n" | Select-Object -Last 20) -join "`n"
+            throw "OpenSSL Configure failed for all targets (mingw64, VC-WIN64A+no-asm).`n$tail`nFull log: $cfgLog"
           }
-          if (-not (Test-Path (Join-Path $srcDir 'configdata.pm'))) { throw "Configure did not produce configdata.pm" }
+          Write-Output "OpenSSL Configure target: $cfgTarget"
+          "OPENSSL_CONFIGURE_TARGET=$cfgTarget" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           $configureSec = [int]$sw.Elapsed.TotalSeconds
 
-          # 5) 生成：.h.in -> .h（纯 Perl 模板替换，不编译）
+          # 5) 生成：.h.in -> .h（纯 Perl 模板替换，不编译）；dofile 只依赖 configdata.pm，-o 仅用于告警文案
           $sw.Restart()
           $templates = @(Get-ChildItem (Join-Path $srcDir 'include\openssl') -Filter *.h.in -File)
           if ($templates.Count -lt 20) { throw "unexpected .h.in template count: $($templates.Count)" }
           $rel = @($templates | ForEach-Object { "include/openssl/$($_.Name)" })
           Push-Location $srcDir
           try {
-            $genOut = (& perl -I. -Mconfigdata util/dofile.pl -oMakefile -i .in @rel 2>&1 | Out-String)
+            $genOut = (& perl -I. -Mconfigdata util/dofile.pl -oConfigure -i .in @rel 2>&1 | Out-String)
             $genCode = $LASTEXITCODE
           } finally {
             Pop-Location
@@ -1035,7 +1054,7 @@ jobs:
             "skip 项: $env:QT_SKIP_MODULES",
             "host 生效模块: $hostModules",
             "重定位: 绝对路径改写 $env:RELOC_PATCHES 处 / 校验 $env:RELOC_LEFT 命中",
-            "SSL: runtime（QT_FEATURE_ssl=$sslFeature，未随包分发 TLS 库；头文件 openssl-$env:OPENSSL_VERSION 由 Configure + util/dofile.pl 生成；" +
+            "SSL: runtime（QT_FEATURE_ssl=$sslFeature，未随包分发 TLS 库；头文件 openssl-$env:OPENSSL_VERSION 由 Configure($env:OPENSSL_CONFIGURE_TARGET) + util/dofile.pl 生成；" +
               "host 侧保持 -no-openssl -schannel，属有意不一致；下游需自带 libssl_3.so / libcrypto_3.so）",
             '',
             '[configure 命令]',

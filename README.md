@@ -320,7 +320,7 @@ cmake -S <your-app> -B build `
 - 不提供库时 `QSslSocket::supportsSsl()` 返回 `false`，HTTPS 等 TLS 功能不可用（不崩溃，只是没有可用后端）。
 - 库必须是 3.x（1.1.1 的后缀命名是 `*_1_1`，与默认值不符）、ABI 与 APK 一致；用 NDK r27+ 构建的库默认满足 Android 15 的 16 KB page size 要求。
 
-**头文件为什么必须"生成"**：OpenSSL 源码包的 `include/openssl` 里只有 116 个实体 `.h` + 28 个 `.h.in` 模板，`ssl.h`、`opensslv.h`、`x509v3.h` 都没有实体文件，必须由 `Configure` + `util/dofile.pl` 做模板替换生成（Qt 的 `FindOpenSSL` 只认 `openssl/ssl.h`，只有模板时 `WrapOpenSSLHeaders` 直接找不到）。所以该步骤需要 Perl（Strawberry 自带 `Text::Template`，OpenSSL 包内也带了一份 vendored 副本），但**不需要编译器、不构建 OpenSSL 库**。耗时是秒级（本机实测：解压 3.3 s、`Configure` 约 84 s（msys perl；CI 的 Strawberry 通常更快）、生成 0.5 s），缓存命中时近似 0。
+**头文件为什么必须"生成"**：OpenSSL 源码包的 `include/openssl` 里只有 116 个实体 `.h` + 28 个 `.h.in` 模板，`ssl.h`、`opensslv.h`、`x509v3.h` 都没有实体文件，必须由 `Configure` + `util/dofile.pl` 做模板替换生成（Qt 的 `FindOpenSSL` 只认 `openssl/ssl.h`，只有模板时 `WrapOpenSSLHeaders` 直接找不到）。所以该步骤需要 Perl（Strawberry 自带 `Text::Template`，OpenSSL 包内也带了一份 vendored 副本），但**不需要编译器、不构建 OpenSSL 库**。另外 Windows runner 上 `Configure` 必须给 Windows 原生目标：Strawberry Perl 是 MSWin32 构建，凡走 unix build_scheme 的目标（`linux-*`、`mingw64`）都会被 `Configurations/unix-checker.pm` 拒绝（`This perl implementation doesn't produce Unix like paths`），只有 VC 目标（`VC-WIN64A`，加 `no-asm` 免除 nasm 依赖）能过 `windows-checker.pm`；目标名只影响生成出的 `configuration.h` 里的平台宏（`OPENSSL_SYS_*`、`SIXTY_FOUR_BIT`），其余 143 个 `.h` 与本机 `linux-x86_64` 产物逐文件哈希一致，公开 API 无差异。耗时是秒级（本机实测：解压 3.3 s、`Configure` 约 84 s（msys perl；CI 的 Strawberry 通常更快）、生成 0.5 s），缓存命中时近似 0。
 
 ## host 前缀内容与用途
 
