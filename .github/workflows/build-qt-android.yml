@@ -727,8 +727,7 @@ jobs:
             'lrelease.exe', 'lrelease-pro.exe', 'lupdate.exe', 'lupdate-pro.exe', 'lconvert.exe'
           )
           # 已批准排除：其它平台部署器、DBus/帮助/文档/测试/分析工具、3D 美术工具、桌面 IDE
-          # 注意：其中多数仍是 Qt6*ToolsTargets 的导入目标，删掉后对应组件的 find_package 会报
-          # "The imported target ... references the file ... but this file does not exist"
+          # 排除只对"仅被 cmake 文本引用"的工具生效；被 Qt6*ToolsTargets 定义为导入目标的工具一律保留
           $excluded = @(
             'windeployqt.exe', 'windeployqt6.exe', 'wasmdeployqt.exe', 'wasmdeployqt6.exe',
             'harmonydeployqt.exe', 'harmonydeployqt6.exe', 'harmonyostestrunner.exe',
@@ -744,6 +743,26 @@ jobs:
             'qmleasing.exe', 'qtplugininfo.exe'
           )
           $excludedLc = @($excluded | ForEach-Object { $_.ToLowerInvariant() })
+          # 导入目标是硬约束：find_package 会逐个校验 IMPORTED_LOCATION 指向的文件是否存在
+          $hostToolTargets = @(Get-ChildItem "$env:HOST_PREFIX\lib\cmake" -Recurse -File -Force -Filter '*Targets*.cmake' |
+            Where-Object { $_.Directory.Name -like 'Qt6*Tools*' })
+          $importedLocs = @()
+          foreach ($f in $hostToolTargets) {
+            $t = [IO.File]::ReadAllText($f.FullName)
+            foreach ($m in [regex]::Matches($t, '(?s)set_target_properties\(\s*(Qt6::[^\s]+?)\s+PROPERTIES(.*?)\n\s*\)')) {
+              foreach ($p in [regex]::Matches($m.Groups[2].Value, 'IMPORTED_LOCATION(?:_[A-Z]+)?\s+"([^"]+)"')) {
+                $importedLocs += @{ Target = $m.Groups[1].Value; Raw = $p.Groups[1].Value }
+              }
+            }
+          }
+          $importedExes = New-Object 'System.Collections.Generic.HashSet[string]'
+          foreach ($l in $importedLocs) {
+            $v = $l.Raw -replace '\\', '/'
+            if ($v -match 'bin/([^/"]+\.exe)$') { [void]$importedExes.Add($Matches[1].ToLowerInvariant()) }
+          }
+          Write-Output ("导入目标 IMPORTED_LOCATION: {0} 处 / {1} 个 exe，扫描 {2} 个 Targets 文件（{3}）" -f
+            $importedLocs.Count, $importedExes.Count, $hostToolTargets.Count,
+            (($hostToolTargets | ForEach-Object { $_.Directory.Name } | Sort-Object -Unique) -join ', '))
           $keepNames = @()
           if ($tools -eq 'full') {
             Write-Output 'host_tools=full：保留 bin 全部文件，跳过白名单裁剪'
@@ -760,6 +779,8 @@ jobs:
             $keep = New-Object 'System.Collections.Generic.HashSet[string]'
             foreach ($n in $essential) { [void]$keep.Add($n.ToLowerInvariant()) }
             foreach ($n in $referenced) { if ($excludedLc -notcontains $n) { [void]$keep.Add($n) } }
+            # 导入目标覆盖排除名单：find_package 会校验文件，缺了就是致命错误
+            foreach ($n in $importedExes) { [void]$keep.Add($n) }
             $binCount = 0
             $binBytes = 0
             foreach ($f in @(Get-ChildItem "$env:HOST_PREFIX\bin" -File -Filter *.exe)) {
@@ -770,12 +791,25 @@ jobs:
             }
             $removed += ,(@{ Name = 'bin (裁掉的 exe)'; Count = $binCount; Bytes = [double]$binBytes })
             $keepNames = @(Get-ChildItem "$env:HOST_PREFIX\bin" -File -Filter *.exe | ForEach-Object { $_.Name })
-            $brokenRefs = @($referenced | Where-Object { $excludedLc -contains $_ } | Sort-Object)
+            $brokenRefs = @($referenced | Where-Object { $excludedLc -contains $_ -and -not $importedExes.Contains($_) } | Sort-Object)
             $missingEssential = @($essential | Where-Object { -not (Test-Path (Join-Path "$env:HOST_PREFIX\bin" $_)) })
             if ($missingEssential.Count -gt 0) { throw "白名单必需工具缺失：$($missingEssential -join ', ')" }
             Write-Output ("cmake 引用 exe: {0} 个；保留: {1} 个；按批准排除删除但仍被 cmake 引用: {2} 个（{3}）" -f
               $referenced.Count, $keepNames.Count, $brokenRefs.Count, ($brokenRefs -join ', '))
           }
+
+          # 3.5) 硬校验：导入目标（exe/dll/py/目录）裁剪后必须仍存在
+          $missingImports = @()
+          foreach ($l in $importedLocs) {
+            $v = ($l.Raw -replace '\\', '/') -replace '\$\{_IMPORT_PREFIX\}', ($env:HOST_PREFIX -replace '\\', '/')
+            if ($v -match '\$\{') { continue }
+            if ($v -match '^bin/') { $v = ($env:HOST_PREFIX -replace '\\', '/') + '/' + $v }
+            if (-not (Test-Path -LiteralPath $v)) { $missingImports += ("{0} -> {1}" -f $l.Target, ($v -replace '/', '\')) }
+          }
+          if ($missingImports.Count -gt 0) {
+            throw "host 前缀裁剪后缺少导入目标文件:`n$($missingImports -join "`n")"
+          }
+          Write-Output ("导入目标文件校验通过：{0} 处（{1} 个 Targets 文件）" -f $importedLocs.Count, $hostToolTargets.Count)
 
           # 4) 自检：缺运行库 DLL 时 Windows 返回 0xC0000135 / 0xC0000139
           $smoke = @(
