@@ -998,11 +998,18 @@ jobs:
             throw "androiddeployqt --help 异常: exit=$adqExit, 输出=$($adqOut.Trim())"
           }
 
+          # target 前缀的 CMake 包缺失时，find_package 的报错与"路径被 re-root"难以区分，先显式断言
+          $tc = "$env:TARGET_PREFIX\lib\cmake\Qt6\qt.toolchain.cmake"
+          $pkg = "$env:TARGET_PREFIX\lib\cmake\Qt6\Qt6Config.cmake"
+          foreach ($f in @($tc, $pkg)) { if (-not (Test-Path $f)) { throw "target 前缀缺少 CMake 包文件：$f" } }
           $build = "$env:WORK_ROOT\smoke-build"
           Remove-Item $build -Recurse -Force -ErrorAction SilentlyContinue
           $log = "$env:WORK_ROOT\smoke-configure.log"
+          # 用 Qt 自带工具链：它 chainload NDK 工具链，并把 lib/cmake 加进 PREFIX_PATH、安装前缀加进 FIND_ROOT_PATH，
+          # 规避 cmake find_package 的 re-root 拼接问题（qt.toolchain.cmake.in:177-184）
           $cfgArgs = @('-S', $proj, '-B', $build, '-G', 'Ninja',
-            "-DCMAKE_TOOLCHAIN_FILE=$env:ANDROID_NDK_ROOT\build\cmake\android.toolchain.cmake",
+            "-DCMAKE_TOOLCHAIN_FILE=$tc",
+            "-DQT_CHAINLOAD_TOOLCHAIN_FILE=$env:ANDROID_NDK_ROOT\build\cmake\android.toolchain.cmake",
             "-DANDROID_ABI=$($env:QT_ABI)", '-DANDROID_PLATFORM=android-23',
             "-DCMAKE_PREFIX_PATH=$($env:TARGET_PREFIX)",
             "-DQT_HOST_PATH=$($env:HOST_PREFIX)")
@@ -1020,7 +1027,8 @@ jobs:
           Remove-Item $build2 -Recurse -Force -ErrorAction SilentlyContinue
           $log2 = "$env:WORK_ROOT\smoke-configure-nohost.log"
           $cfg2 = @('-S', $proj, '-B', $build2, '-G', 'Ninja',
-            "-DCMAKE_TOOLCHAIN_FILE=$env:ANDROID_NDK_ROOT\build\cmake\android.toolchain.cmake",
+            "-DCMAKE_TOOLCHAIN_FILE=$tc",
+            "-DQT_CHAINLOAD_TOOLCHAIN_FILE=$env:ANDROID_NDK_ROOT\build\cmake\android.toolchain.cmake",
             "-DANDROID_ABI=$($env:QT_ABI)", '-DANDROID_PLATFORM=android-23',
             "-DCMAKE_PREFIX_PATH=$($env:TARGET_PREFIX)")
           & cmake @cfg2 2>&1 | Tee-Object -FilePath $log2

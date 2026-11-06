@@ -70,7 +70,7 @@
 8. `scripts/verify-android-prefix.py` 校验 ABI/关键库/host 工具/`Qt6HostInfo`/`Qt6Android.jar`/Gradle wrapper，并新增 SSL 三条断言（`QT_FEATURE_ssl=1`、`QtNetwork`/openssl 后端的 `NEEDED` 不含 `libssl`/`libcrypto`、前缀内无 `libssl*.so`/`libcrypto*.so`），输出 `manifest.json`。
 9. **裁剪 host 前缀**（`host_tools=android` 时）：目录/`lib`/`bin` 三级白名单，被删清单写入 `D:\qt\prune-report.txt`（见「host 前缀内容与用途」）。
 10. **重定位**：把交付前缀里残留的构建机绝对路径改写成相对表达式（`target/bin/qmake*.bat` → `%~dp0..\..\host\bin\…`，`Qt6Dependencies.cmake` → `${Qt6_DIR}/../../../../host`，`QtBuildInternalsExtra.cmake` → `${CMAKE_CURRENT_LIST_DIR}/../../..`，`mkspecs/modules/qt_ext_*.pri` 的源码树头文件目录置空），并校验 `target_qt.conf` 的 `HostPrefix=../../host` 确实解析到 host 前缀；末尾硬校验整个交付前缀内 `D:\qt` / `D:/qt` 命中必须为 0，否则打印文件清单并失败。
-11. **冒烟 host 工具**：用裁剪后的 host 前缀对最小 Qt Widgets+Quick 工程跑 `cmake` 配置（`-DCMAKE_TOOLCHAIN_FILE=<NDK>/build/cmake/android.toolchain.cmake`、`-DANDROID_ABI=<abi>`、`-DCMAKE_PREFIX_PATH=<target>`、`-DQT_HOST_PATH=<host>`）+ `androiddeployqt --help`，失败会点名缺失工具；随后**不传 `-DQT_HOST_PATH`** 再配置一次，配置通过且 `CMakeCache` 里有 `Qt6HostInfo_DIR` 才算相对路径真的生效。
+11. **冒烟 host 工具**：用裁剪后的 host 前缀对最小 Qt Widgets+Quick 工程跑 `cmake` 配置（`-DCMAKE_TOOLCHAIN_FILE=<target>/lib/cmake/Qt6/qt.toolchain.cmake`、`-DQT_CHAINLOAD_TOOLCHAIN_FILE=<NDK>/build/cmake/android.toolchain.cmake`、`-DANDROID_ABI=<abi>`、`-DCMAKE_PREFIX_PATH=<target>`、`-DQT_HOST_PATH=<host>`）+ `androiddeployqt --help`，失败会点名缺失工具；随后**不传 `-DQT_HOST_PATH`** 再配置一次，配置通过且 `CMakeCache` 里有 `Qt6HostInfo_DIR` 才算相对路径真的生效。
 12. 生成 `BUILD-INFO.txt`（UTF-8 with BOM，压缩包顶层），记录版本/ABI/host 来源与链接方式、skip 项、host 生效模块、SSL 模式与 OpenSSL 头文件版本、重定位改写处数与校验命中数、host/target configure 原文、工具链版本、runner 环境、`T_*` 阶段耗时、`[裁剪记录]`、产物自检输出与 target 图像插件清单。
 13. 7z 打包 **target + host 两个前缀 + `BUILD-INFO.txt`**（`-mx=9 -ms=on`）并上传 artifact：`qt-<ver>-android-<abi>-windows-host`。
 
@@ -362,7 +362,7 @@ CI 内的自动校验（`scripts/verify-android-prefix.py`）：
 
 `Prune host prefix` 之后另有一道 `Smoke host tools (minimal Android project configure)` 步骤：
 
-- 用裁剪后的 host 前缀对最小 Qt Widgets+Quick 工程跑 `cmake` 配置（`-DCMAKE_TOOLCHAIN_FILE=<NDK>/build/cmake/android.toolchain.cmake`、`-DANDROID_ABI=<abi>`、`-DCMAKE_PREFIX_PATH=<target>`、`-DQT_HOST_PATH=<host>`），验证 `find_package(Qt6: Core/Gui/Widgets/Qml/Quick/QuickControls2)` 与 QML 模块解析；
+- 用裁剪后的 host 前缀对最小 Qt Widgets+Quick 工程跑 `cmake` 配置（`-DCMAKE_TOOLCHAIN_FILE=<target>/lib/cmake/Qt6/qt.toolchain.cmake`、`-DQT_CHAINLOAD_TOOLCHAIN_FILE=<NDK>/build/cmake/android.toolchain.cmake`、`-DANDROID_ABI=<abi>`、`-DCMAKE_PREFIX_PATH=<target>`、`-DQT_HOST_PATH=<host>`），验证 `find_package(Qt6: Core/Gui/Widgets/Qml/Quick/QuickControls2)` 与 QML 模块解析；
 - 再跑一次 `androiddeployqt --help`：该工具按设计返回退出码 1（帮助请求与语法错误共用 `SyntaxErrorOrHelpRequested`），帮助文本写到 stderr 且以 `Syntax: androiddeployqt` 开头，所以判定是"退出码 ∈ {0,1} 且输出含该行"；缺工具时直接 `throw` 并点名，日志里出现 `does not exist`/`Could not find` 会作为告警打印。
 
 拿到 7z 后逐条确认 host 前缀可用（解压目录设为 `D:\qt`）：
