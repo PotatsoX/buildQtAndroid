@@ -441,7 +441,8 @@ jobs:
         uses: actions/cache@v6
         with:
           path: D:\qt\host
-          key: qt-host-build-${{ env.QT_VERSION }}-${{ env.SKIP_KEY }}-${{ env.HOST_LINKAGE }}-hostset${{ env.HOST_SET_KEY }}-mingw${{ env.MINGW_VERSION }}-cmake${{ env.CMAKE_VERSION }}-v1
+          # 缓存里存的是已裁剪的前缀：裁剪规则变更后旧缓存会缺文件，必须 bump 末尾版本号
+          key: qt-host-build-${{ env.QT_VERSION }}-${{ env.SKIP_KEY }}-${{ env.HOST_LINKAGE }}-hostset${{ env.HOST_SET_KEY }}-mingw${{ env.MINGW_VERSION }}-cmake${{ env.CMAKE_VERSION }}-v2
 
       - name: Build host Qt tools (source)
         shell: pwsh
@@ -474,6 +475,23 @@ jobs:
           $markerId = "build:$env:HOST_LINKAGE`:$env:HOST_SET_KEY"
           $marker = Join-Path $env:HOST_PREFIX '.cache-ok'
           if ((Test-Path $marker) -and ((Get-Content $marker -Raw).Trim() -eq $markerId)) {
+            # 缓存里是裁剪后的前缀：旧裁剪规则可能删过导入目标文件，命中也要先校验，缺失即要求 bump 缓存 key
+            $badImport = @()
+            foreach ($f in @(Get-ChildItem "$env:HOST_PREFIX\lib\cmake" -Recurse -File -Filter '*Targets*.cmake' |
+                Where-Object { $_.Directory.Name -like 'Qt6*Tools*' })) {
+              $tgt = [IO.File]::ReadAllText($f.FullName)
+              foreach ($m in [regex]::Matches($tgt, '(?s)set_target_properties\(\s*(Qt6::[^\s]+?)\s+PROPERTIES(.*?)\n\s*\)')) {
+                foreach ($p in [regex]::Matches($m.Groups[2].Value, 'IMPORTED_LOCATION(?:_[A-Z]+)?\s+"([^"]+)"')) {
+                  $v = ($p.Groups[1].Value -replace '\\', '/') -replace '\$\{_IMPORT_PREFIX\}', ($env:HOST_PREFIX -replace '\\', '/')
+                  if ($v -notmatch '\${' -and -not (Test-Path -LiteralPath $v)) {
+                    $badImport += ("{0} -> {1}" -f $m.Groups[1].Value, $v)
+                  }
+                }
+              }
+            }
+            if ($badImport.Count -gt 0) {
+              throw "host 缓存前缀缺少导入目标文件（缓存是旧裁剪结果，需 bump qt-host-build 缓存 key 版本）:`n$($badImport -join "`n")"
+            }
             Write-Output 'host 前缀命中 build 缓存，跳过 host 构建'
             exit 0
           }
@@ -773,7 +791,16 @@ jobs:
               Remove-Item $f.FullName -Force
             }
           }
-          Write-Output ("lib 导入目标库保留: {0} 个（{1}）" -f $keepLib.Count, ($keepLib -join ', '))
+          # 删除后立即校验：保留集合里的文件必须还在，缺失说明前缀本身就缺（旧裁剪缓存），当场暴露
+          $missingLib = @($keepLib | Where-Object { -not (Test-Path -LiteralPath (Join-Path "$env:HOST_PREFIX\lib" $_)) })
+          if ($missingLib.Count -gt 0) {
+            throw ("lib 保留集合校验失败：{0} 个缺失（{1}），本步骤未删它们，前缀应来自旧裁剪缓存" -f
+              $missingLib.Count, ($missingLib -join ', '))
+          }
+          $libFiles = @(Get-ChildItem "$env:HOST_PREFIX\lib" -File -Force -ErrorAction SilentlyContinue |
+            Where-Object { $_.Extension -in '.a', '.lib', '.dll' })
+          Write-Output ("lib 导入目标库保留: {0} 个（{1}）；lib 现存库文件 {2} 个（{3}）" -f
+            $keepLib.Count, ($keepLib -join ', '), $libFiles.Count, (($libFiles | ForEach-Object Name) -join ', '))
           $keepNames = @()
           if ($tools -eq 'full') {
             Write-Output 'host_tools=full：保留 bin 全部文件，跳过白名单裁剪'

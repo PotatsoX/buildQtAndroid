@@ -267,9 +267,11 @@ host 侧参数（`-platform win32-g++`、`-qt-zlib`、`-schannel` 等）只用�
 | 源码归档（约 605 MB） | `qt-src-zip-<qt_version>-v1` |
 | Android SDK/NDK（约 3 GB） | `android-<ndk>-<platform>-<build-tools>-<cmdline>-v1` |
 | Gradle home（推断 1–2 GB） | `gradle-qt<qt_version>-bt<build-tools>-v1` |
-| host 前缀（未裁剪约 1.4 GB） | `qt-host-build-<qt_version>-<skip_key>-<linkage>-hostset<host_set>-mingw<ver>-cmake<ver>-v1`；`auto` 时 `<host_set>` 为白名单内容的 8 位散列 |
+| host 前缀（未裁剪约 1.4 GB） | `qt-host-build-<qt_version>-<skip_key>-<linkage>-hostset<host_set>-mingw<ver>-cmake<ver>-v2`；`auto` 时 `<host_set>` 为白名单内容的 8 位散列 |
 
 `host_set` 是 `host_modules` 的归一化串（非字母数字 → `-`、小写）；`auto` 时取白名单内容的 SHA-256 前 8 位（`auto-xxxxxxxx`），白名单一变缓存即失效。`.cache-ok` 标记内容为 `build:<linkage>:<host_set>`，恢复缓存后还会再校验一次，避免把旧的全量前缀当最小集用。`<linkage>` 为 `shared`/`static`，两种链接方式的前缀不可互换。
+
+**缓存里存的是"已裁剪"的前缀**：裁剪白名单变化（例如新增必须保留的静态库）后旧缓存会缺文件，必须手动 bump key 末尾的 `-vN`。命中缓存时也会扫描 `Qt6*Tools*/*Targets*.cmake` 的 `IMPORTED_LOCATION` 逐个 `Test-Path`，缺失即报错并要求 bump，不会带着残缺前缀继续往下跑。
 
 host 前缀是最贵的一项缓存：命中即跳过约 2 小时 41 分 48 秒的 host 编译，未命中（key 变化或 `.cache-ok` 标识不符）就整段重编。它与源码归档、Android SDK/NDK、Gradle home 共用仓库 **10 GB 配额**，其中 SDK/NDK 约 3 GB、源码归档约 605 MB、未裁剪 host 前缀约 1.4 GB。target 构建目录不入缓存（每次构建前删除），target 前缀本身也不入缓存。
 
@@ -603,7 +605,7 @@ Qt 6.12 里 Android 的 `Qt6Android.jar` 由源码树内的 Gradle 工程构建�
 - 全模块构建（把 `skip_modules` 置空）在 4 vCPU / 14 GB 盘上很可能超时或超盘；需 larger runner（如 `windows-latest-8-cores`），或保留较长的 `skip_modules`。
 - Gradle 阶段的具体耗时与 `~/.gradle` 实际体积**未实测**：冷启动需下载 Gradle 9.5.1 分发包（140,320,662 字节）+ AGP 9.2.1 及其依赖，推断 3–6 分钟；热缓存下只跑离线校验，推断半分钟以内。`actions/cache` 对 `~/.gradle` 的压缩/解压开销也计入该时间。
 - 补丁版场景：若填入的是尚未发布/商业 LTS 专属的版本，会在 `Fetch Qt sources` 阶段失败（`official_releases` 与 `archive` 两处地址都不可用）。
-- **host 每轮必编**：全模块实测 2 小时 41 分 48 秒，仅 host 前缀缓存命中才跳过；缓存 key 任一组成（版本/skip/linkage/host_set/MinGW/CMake）变化，或 `.cache-ok` 标识不符，都会整段重编。
+- **host 每轮必编**：全模块实测 2 小时 41 分 48 秒，仅 host 前缀缓存命中才跳过；缓存 key 任一组成（版本/skip/linkage/host_set/MinGW/CMake）变化、裁剪白名单变化后未 bump `-vN`，或 `.cache-ok` 标识不符，都会整段重编。
 - artifact 为未签名的 Qt 前缀，不含 APK，不含 Android 签名材料。
 - artifact 中的 host 前缀已按白名单裁剪（顶层只留 `bin`/`lib`/`mkspecs`/`metatypes`，`bin` 只留工具白名单），旧口径实测 1,472 MB → 285.1 MB（7z 后 60 MB）；新口径体积待首轮 CI 的 `[裁剪记录]`。只够交叉编译与 `androiddeployqt` 部署，需要桌面 Qt 开发能力时不要用它。
 - **裁剪风险**：被排除的工具（windeployqt/wasmdeployqt/harmonydeployqt、qdbus 系列、qhelpgenerator、3D 美术工具等）多数仍是 `Qt6*ToolsTargets` 的导入目标，对应组件的 `find_package` 可能报 *"The imported target ... references the file ... but this file does not exist"*；`host_tools=full` 是一键排除开关。
