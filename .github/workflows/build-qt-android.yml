@@ -708,12 +708,7 @@ jobs:
           foreach ($d in @(Get-ChildItem "$env:HOST_PREFIX\lib" -Directory -Force -ErrorAction SilentlyContinue)) {
             if (@('cmake') -notcontains $d.Name) { Remove-Tree $d.FullName }
           }
-          # 静态导入库只留 libQt6EntryPoint.a（Qt6EntryPointPrivate 的导入目标指向它，缺了 Windows 侧 configure 直接失败）
-          $entryPoint = "$env:HOST_PREFIX\lib\libQt6EntryPoint.a"
-          $hasEntryPoint = Test-Path $entryPoint
-          if ($hasEntryPoint) { Move-Item $entryPoint "$env:HOST_PREFIX\lib\_entrypoint.keep" -Force }
-          Remove-Item "$env:HOST_PREFIX\lib\*.a" -Force -ErrorAction SilentlyContinue
-          if ($hasEntryPoint) { Move-Item "$env:HOST_PREFIX\lib\_entrypoint.keep" $entryPoint -Force }
+          # lib 下的 *.a 等库文件在解析完导入目标后再选择性删除（见 3.1）
           # *.prl 保留：qmake 消费方的元数据，体积可忽略
 
           # 3) bin 白名单：cmake 引用集合（去掉已批准的排除项）+ 必需工具；其余 exe 一律删除
@@ -760,9 +755,25 @@ jobs:
             $v = $l.Raw -replace '\\', '/'
             if ($v -match 'bin/([^/"]+\.exe)$') { [void]$importedExes.Add($Matches[1].ToLowerInvariant()) }
           }
-          Write-Output ("导入目标 IMPORTED_LOCATION: {0} 处 / {1} 个 exe，扫描 {2} 个 Targets 文件（{3}）" -f
+          Write-Output ("导入目标 IMPORTED_LOCATION: {0} 处 / {1} 个 bin exe，扫描 {2} 个 Targets 文件（{3}）" -f
             $importedLocs.Count, $importedExes.Count, $hostToolTargets.Count,
             (($hostToolTargets | ForEach-Object { $_.Directory.Name } | Sort-Object -Unique) -join ', '))
+
+          # 3.1) lib 白名单：IMPORTED_LOCATION 指向的库同样必须保留（静态 host 构建下
+          #      Qt6ShaderTools / Qt6UiTools 等库本身就是导入目标，不只是 exe）
+          $keepLib = New-Object 'System.Collections.Generic.HashSet[string]'
+          # Qt6EntryPointPrivate 的导入目标在 lib/cmake/Qt6EntryPointPrivate 下（不在 Qt6*Tools* 范围），单独保证
+          [void]$keepLib.Add('libqt6entrypoint.a')
+          foreach ($l in $importedLocs) {
+            $v = (($l.Raw -replace '\\', '/') -replace '\$\{_IMPORT_PREFIX\}', '') -replace '^[./]+', ''
+            if ($v -match '^lib/([^/"]+)$') { [void]$keepLib.Add($Matches[1].ToLowerInvariant()) }
+          }
+          foreach ($f in @(Get-ChildItem "$env:HOST_PREFIX\lib" -File -Force -ErrorAction SilentlyContinue)) {
+            if ($f.Extension -in '.a', '.lib', '.dll' -and -not $keepLib.Contains($f.Name.ToLowerInvariant())) {
+              Remove-Item $f.FullName -Force
+            }
+          }
+          Write-Output ("lib 导入目标库保留: {0} 个（{1}）" -f $keepLib.Count, ($keepLib -join ', '))
           $keepNames = @()
           if ($tools -eq 'full') {
             Write-Output 'host_tools=full：保留 bin 全部文件，跳过白名单裁剪'
