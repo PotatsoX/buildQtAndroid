@@ -1,5 +1,7 @@
 # buildQtAndroid
 
+[![build-qt-android](https://github.com/PotatsoX/buildQtAndroid/actions/workflows/build-qt-android.yml/badge.svg?branch=main)](https://github.com/PotatsoX/buildQtAndroid/actions/workflows/build-qt-android.yml)
+
 在 **Windows runner** 上从 Qt 源码构建 **Android（arm64-v8a / armeabi-v7a）** 版 Qt（Windows 主机交叉编译）；host 工具在同一次 run 里由本工作流从源码自建（Windows 桌面构建，MinGW 15.1.0），产物**同时包含 target 前缀与 host 前缀**，拿到即可交叉编译并用 `androiddeployqt` 打包 APK。
 
 > 本仓库只构建 Qt 库/Qt 前缀，不构建、不签名 APK；APK 打包属于使用方的 `androiddeployqt + Gradle` 流程。
@@ -225,26 +227,22 @@ host 侧参数（`-platform win32-g++`、`-qt-zlib`、`-schannel` 等）只用�
 
 ### host 链接方式（输入 `host_linkage`）
 
-默认 `shared`。Qt 官方文档不建议静态 host 配共享 target：[Cross-compiling Qt（6.12）](https://doc-snapshots.qt.io/qt6-6.12/cross-compiling-qt.html) 原文 “Avoid building the host Qt statically if the target Qt is built shared. A static build of Qt might not contain all tools necessary to build a shared Qt.”；MinGW 静态构建也不在 Qt 官方 CI 矩阵内（Windows 静态包是 MSVC 构建，mingw 行不带 `-static`）。因此 `static` 只作 opt-in，默认路径不改变。
+默认 `shared`：官方文档不建议静态 host 配共享 target（[Cross-compiling Qt（6.12）](https://doc-snapshots.qt.io/qt6-6.12/cross-compiling-qt.html)：“Avoid building the host Qt statically if the target Qt is built shared.”），且 MinGW 静态构建不在 Qt 官方 CI 矩阵内（Windows 静态包是 MSVC 构建）。`static` 只作 opt-in。
 
-`configure` 接受这个组合（Qt 6.12 `qtbase/configure.cmake`，本地已核对）：
-
-- `qt_feature_alias("static" ... ALIAS_OF_FEATURE "shared" NEGATE)`（:557-560）→ `-static` 等价于 `BUILD_SHARED_LIBS=OFF`；
-- `qt_feature("static_runtime" ... CONDITION NOT QT_FEATURE_shared ... WIN32)`（:1217-1221）→ 静态 + Windows 合法；
-- `qt_feature("relocatable" ... AUTODETECT QT_FEATURE_shared OR APPLE ... CONDITION QT_FEATURE_dlopen OR WIN32 OR NOT QT_FEATURE_shared)`（:1234-1239）→ Windows 静态下不会自动开启，需显式 `-DFEATURE_relocatable=ON`；源码没有“静态不可 relocatable”的拒绝分支。
+参数合法性依据 [qtbase/configure.cmake](https://github.com/qt/qtbase/blob/v6.12.0/configure.cmake)：`static` 是 `shared` 的取反别名（:557-560）；`static_runtime` 仅在静态 + WIN32 下成立（:1217-1221）；`relocatable` 在 Windows 静态下不自动开启，需显式 `-DFEATURE_relocatable=ON`，源码没有“静态不可 relocatable”的拒绝分支（:1234-1239）。
 
 | 组合 | 行为 |
 |---|---|
 | `shared`（默认） | `bin` 内有 `Qt6*.dll` 与 MinGW 运行库，工具可直接运行 |
-| `static` | 工具静态链接，`bin` 内无 `Qt6*.dll`；`lib/*.a` 在裁剪步骤仍会删除（只留 `libQt6EntryPoint.a`），交叉编译只消费 `bin` 下的 exe |
+| `static` | 工具静态链接，`bin` 内无 `Qt6*.dll`；`lib/*.a` 只保留被 `IMPORTED_LOCATION` 引用的库与 `libQt6EntryPoint.a`，其余删除 |
 
-未验证项（本机没有 Qt 源码与 MinGW 15.1.0，只验证了本机 MinGW 8.1.0 的 `gcc -static` 能正常链接）：
+未验证项：
 
-- 静态 host 能否编出、默认 10 个模块的工具是否齐全、`androiddeployqt` 静态版能否读写 `Qt6Android.jar` 与 Gradle wrapper、交叉编译侧 `Qt6*Tools`/`Qt6HostInfo` 是否仍能解析 —— **均需 CI 首轮确认**。
-- 时间：相对 run #6 的 host 2 小时 41 分 48 秒，静态链接通常略增（推断 +10%–20%，未实测）。
-- 体积（run #9 实测，host 静态自建、旧裁剪口径）：host 前缀 2015.1 MB / 6890 文件，target 前缀 420.5 MB / 16804 文件，7z 包（`-mx=5`）384.7 MB；其中 host `bin` 1956.3 MB（61 个 exe）占 host 的 97%，`lib` 13.0 MB、`plugins` 25.6 MB、`qml` 9.2 MB、`metatypes` 9.0 MB、`mkspecs` 0.7 MB。新白名单裁剪（见「host 前缀内容与用途」）会整块删掉 plugins/qml/share/modules/include/doc/sbom 与 `lib/objects-Release`，并排除一批美术/部署器类 exe，体积会再降；具体数值以首轮 CI 的 `[裁剪记录]` 为准（未实测）。
+- 静态 host 能否编出、默认 10 个模块的工具是否齐全、`androiddeployqt` 静态版能否读写 `Qt6Android.jar` 与 Gradle wrapper、交叉编译侧 `Qt6*Tools`/`Qt6HostInfo` 是否仍能解析 —— 需首轮 CI 确认。
+- 时间：相对 `shared` 的 host 实测 2 小时 41 分 48 秒略增（推断 +10%–20%，未实测）。
+- 体积（旧裁剪口径实测，静态 host）：host 前缀 2015.1 MB / 6890 文件，target 前缀 420.5 MB / 16804 文件，7z 包（`-mx=5`）384.7 MB；其中 host `bin` 1956.3 MB（61 个 exe）占 host 的 97%。新白名单裁剪后的数值以首轮 CI 的 `[裁剪记录]` 为准。
 - 静态 host 前缀不可重定位：`qmake -query` 能返回编译期的 `D:/qt/host`，但没有 `bin/qt.conf` 时 `qmake` 生成 Makefile 会报 `Could not find qmake spec 'win32-g++'`；补一行 `[Paths] Prefix=..` 的 `bin/qt.conf` 即可（实测）。
-- 自包含（把 host 复制进 target 前缀）**未落地**：仍保留 target/host 双前缀，但已通过 `Relocate prefixes` 步骤把两者之间的引用改成相对表达式，因此**不再需要**显式 `QT_HOST_PATH`（保持同级目录即可）；把 host 嵌进 target 前缀仍是另一种做法，需同步改 `target_qt.conf` 与 `QtBuildInternalsExtra.cmake` 的路径推导，未做。
+- 自包含（把 host 复制进 target 前缀）**未落地**：仍用 target/host 双前缀，靠 `Relocate prefixes` 把两者引用改成相对表达式，因此不再需要显式 `QT_HOST_PATH`。嵌入需同步改 `target_qt.conf` 与 `QtBuildInternalsExtra.cmake` 的路径推导，未做。
 
 ### 磁盘与时间估算（D: 约 14 GB）
 
@@ -255,7 +253,7 @@ host 侧参数（`-platform win32-g++`、`-qt-zlib`、`-schannel` 等）只用�
 - 构建目录（推断，未实测）：target 8–12 GB；峰值需同时容纳源码 + target 构建目录 + target 前缀 + host 前缀（1.4 GB），全模块很可能触到 D: 14 GB 上限。
 - 时间：host 一律自建，全模块在 run #6 实测 **2 小时 41 分 48 秒**——这是每轮都要付的成本，仅当 host 前缀缓存命中（`.cache-ok` 标识一致）时才跳过；`host_modules=auto` 默认只编 10 个模块（跳过 qtgrpc/qtscxml/qtremoteobjects/qtopcua），推断省 45–75 分钟（待 CI 的 `T_HOST_*` 计时校准）。剩下的大头是 target（run #6 实测 1 小时 39 分 26 秒）；默认 skip 了 10 个模块与 3 个 feature，target 侧推断再省 5–15 分钟、磁盘占用小幅下降（均未实测）。关闭 `qtiff` 后不再编 bundled libtiff（约 40 个 C 文件），推断再省 1–3 分钟；target 前缀少约 0.46 MB/ABI（按 Qt 5.15.2 官方 Android 包实测，6.12 待 CI 校准）。4 vCPU 下全模块仍有超 6 小时风险；可选办法：换 larger runner，或继续加长 `skip_modules`（只改运行参数）。
 - 解压开销构成：每文件一次的实时写入 + 扫描是主因，压缩流解码只占几十秒。工作流因此在装工具前加了 Defender 路径排除（`D:\qt`、`C:\tools`、`C:\android`、workspace），失败不致命。
-- 源码用官方 **zip**（604,643,023 字节，md5 `64889aee0623311cce096be5f445c7d1`，取自官方 `md5sums.txt` 的 zip 行）：比同内容的 tar 大 36%，但 271 MB/s 下下载只差约 1 秒，换来 7-Zip 多线程解压且不必先解成中转文件。
+- 源码用官方 **zip**（604,643,023 字节，md5 `64889aee0623311cce096be5f445c7d1`，取自官方 `md5sums.txt` 的 zip 行）：比同内容的 tar 大 36%，但下载只差约 1 秒，换来 7-Zip 多线程解压且不必先解成中转文件。
 - host 前缀体积：自建（未裁剪）约 1.4 GB，旧裁剪口径下 285.1 MB、按 7z `-mx=5` 单独实测 **60 MB**；明细见「host 前缀内容与用途」。新白名单裁剪更激进，体积以首轮 CI 的 `[裁剪记录]` 实测为准。`host_linkage=static` 的体积与耗时为推断值（见「host 链接方式」）。target 前缀结构未做裁剪（本机不可测，标注为未核实）。
 - 打包：`-mx=9 -ms=on`（LZMA2 256MB 字典、solid），压缩率对齐 Fs 产物的 ~9.7x（旧 `-mx=5` 为 5.5x）；代价是打包步骤从约 4 分钟升到 10–15 分钟。按 275 MB 的整包实测基准推算，新参数下整包约 **100–130 MB**（推断，不是实测）。
 - ccache/sccache 未启用：Windows 下收益与稳定性未验证。
@@ -322,19 +320,19 @@ cmake -S <your-app> -B build `
 - 不提供库时 `QSslSocket::supportsSsl()` 返回 `false`，HTTPS 等 TLS 功能不可用（不崩溃，只是没有可用后端）。
 - 库必须是 3.x（1.1.1 的后缀命名是 `*_1_1`，与默认值不符）、ABI 与 APK 一致；用 NDK r27+ 构建的库默认满足 Android 15 的 16 KB page size 要求。
 
-**头文件为什么必须"生成"**：OpenSSL 源码包的 `include/openssl` 里只有 116 个实体 `.h` + 28 个 `.h.in` 模板，`ssl.h`、`opensslv.h`、`x509v3.h` 都没有实体文件，必须由 `Configure` + `util/dofile.pl` 做模板替换生成（Qt 的 `FindOpenSSL` 只认 `openssl/ssl.h`，只有模板时 `WrapOpenSSLHeaders` 直接找不到）。所以该步骤需要 Perl（Strawberry 自带 `Text::Template`，OpenSSL 包内也带了一份 vendored 副本），但**不需要编译器、不构建 OpenSSL 库**。另外 Windows runner 上 `Configure` 必须给 Windows 原生目标：Strawberry Perl 是 MSWin32 构建，凡走 unix build_scheme 的目标（`linux-*`、`mingw64`）都会被 `Configurations/unix-checker.pm` 拒绝（`This perl implementation doesn't produce Unix like paths`），只有 VC 目标（`VC-WIN64A`，加 `no-asm` 免除 nasm 依赖）能过 `windows-checker.pm`；目标名只影响生成出的 `configuration.h` 里的平台宏（`OPENSSL_SYS_*`、`SIXTY_FOUR_BIT`），其余 143 个 `.h` 与本机 `linux-x86_64` 产物逐文件哈希一致，公开 API 无差异。耗时是秒级（本机实测：解压 3.3 s、`Configure` 约 84 s（msys perl；CI 的 Strawberry 通常更快）、生成 0.5 s），缓存命中时近似 0。
+**头文件为什么必须“生成”**：OpenSSL 源码包的 `include/openssl` 只有 116 个实体 `.h` + 28 个 `.h.in`，`ssl.h`、`opensslv.h`、`x509v3.h` 等都没有实体文件，必须由 `Configure` + `util/dofile.pl` 生成（Qt 的 `FindOpenSSL` 只认 `openssl/ssl.h`，只有模板时 `WrapOpenSSLHeaders` 找不到）。因此需要 Perl（Strawberry 自带 `Text::Template`），但不需要编译器、不构建 OpenSSL 库。Windows runner 上 `Configure` 只能给 Windows 原生目标：Strawberry Perl 是 MSWin32 构建，unix build_scheme 目标（`linux-*`、`mingw64`）被 `Configurations/unix-checker.pm` 拒绝，只有 VC 目标（`VC-WIN64A` + `no-asm` 免 nasm）能过 `windows-checker.pm`；目标名只影响 `configuration.h` 的平台宏，其余 143 个 `.h` 与本机 `linux-x86_64` 产物逐文件哈希一致。耗时秒级（实测解压 3.3 s、`Configure` 约 84 s、生成 0.5 s），缓存命中近似 0。
 
 ## host 前缀内容与用途
 
-`target` 前缀结构完全不动（交叉编译与 `androiddeployqt` 都依赖它）；host 前缀在 `Prune host prefix` 步骤按白名单裁剪（`host_tools=android` 默认，`full` 跳过 `bin` 白名单裁剪）。`host_linkage=static` 时 `bin` 内没有 `Qt6*.dll`/MinGW 运行库（工具已静态链接），`lib/*.a` 是实际静态库而非导入库，裁剪时同样删除，只留 `libQt6EntryPoint.a`。
+`target` 前缀结构完全不动（交叉编译与 `androiddeployqt` 都依赖它）；host 前缀在 `Prune host prefix` 步骤按白名单裁剪（`host_tools=android` 默认，`full` 跳过 `bin` 白名单裁剪）。`host_linkage=static` 时 `bin` 内没有 `Qt6*.dll`/MinGW 运行库（工具已静态链接），`lib/*.a` 只保留被 `IMPORTED_LOCATION` 引用的库与 `libQt6EntryPoint.a`。
 
 按用途分三层：
 
 | 层 | 内容 | 谁在用 |
 |---|---|---|
 | 部署 | `bin\androiddeployqt.exe`、`bin\qtpaths.exe`、`bin\Qt6*.dll`、MinGW 运行库（`libstdc++-6.dll`/`libgcc_s_seh-1.dll`/`libwinpthread-1.dll`） | `androiddeployqt` 打包 APK；DLL 是 exe 的加载依赖 |
-| 交叉编译 | `bin\` 白名单 exe（`*ToolsTargets-release.cmake` 实际引用的 55 项 ∪ 21 项必需工具）、`lib\cmake\`（`Qt6HostInfo`、`Qt6*Tools`）、`lib\libQt6EntryPoint.a`、`lib\*.prl`、`mkspecs\`、`metatypes\` | `find_package(Qt6)` 解析 host 工具与 `Qt6HostInfo`；`qmake`/`qtpaths` 查询安装布局 |
-| 已删除 | `plugins\`、`qml\`、`share\`、`phrasebooks\`、`modules\`、`include\`、`doc\`、`sbom\`、`lib\objects-Release\`、`lib\*.a`（`libQt6EntryPoint.a` 除外）、白名单外的 exe | 桌面开发、文档、美术工具，交叉编译不需要 |
+| 交叉编译 | `bin\` 白名单 exe（`*ToolsTargets-release.cmake` 实际引用的 55 项 ∪ 21 项必需工具）、`lib\cmake\`（`Qt6HostInfo`、`Qt6*Tools`）、`lib\` 下被 `IMPORTED_LOCATION` 引用的库（含 `libQt6EntryPoint.a`）、`lib\*.prl`、`mkspecs\`、`metatypes\` | `find_package(Qt6)` 解析 host 工具与 `Qt6HostInfo`；`qmake`/`qtpaths` 查询安装布局 |
+| 已删除 | `plugins\`、`qml\`、`share\`、`phrasebooks\`、`modules\`、`include\`、`doc\`、`sbom\`、`lib\objects-Release\`、未被导入目标引用的 `lib\*.a`、白名单外的 exe | 桌面开发、文档、美术工具，交叉编译不需要 |
 
 裁剪规则：
 
@@ -345,11 +343,9 @@ cmake -S <your-app> -B build `
 - **明确排除**：`windeployqt`/`wasmdeployqt`/`harmonydeployqt`、`qdbus` 系列、`qhelpgenerator`、`qtattributionsscanner`/`svgtoqml`、`qmltestrunner`/`qmlpreview`/`qmlprofiler`/`ltext2id`/`lcheck`/`qmlaotstats`/`qlalr`/`qmlcontextpropertydump`/`qcshadergen`/`qvkgen`/`cooker`，以及全部 3D 美术工具（`balsam`/`balsamui`/`lightmapviewer`/`meshdebug`/`materialeditor`/`shadergen`/`particleshadergen`/`instancer`/`shapegen`/`lottietoqml`）。名单内若仍是导入目标（如 `qlalr`），导入目标优先，实际保留。
 - **`.cache-ok` 保留在前缀里**：`actions/cache` 在 job 末尾才保存，删掉它下一轮就无法校验缓存命中（会白跑一遍 host 编译）；打包用 `7z -x!.cache-ok` 排除，产物中不含该文件。
 
-**风险**：`bin` 白名单已改为"导入目标 `IMPORTED_LOCATION` 为准、cmake 文本扫描仅作补充"，因此被排除名单里仍属导入目标的工具（如 `qlalr`）会被保留；裁剪后还会逐个 `Test-Path` 校验，缺失时报 `<target> -> <path>` 而不是笼统的 configure 失败。`host_tools=full` 是一键排除开关（跳过 `bin` 白名单裁剪），用于判断“是不是裁太狠”。被删清单（逐项文件数与 MB）写入 `D:\qt\prune-report.txt`，数量与总大小汇总进 `BUILD-INFO.txt` 的 `[裁剪记录]` 段。
+**风险**：白名单以导入目标 `IMPORTED_LOCATION` 为准（含静态库），被排除名单里仍属导入目标的工具会保留；裁剪后逐个 `Test-Path` 校验，缺失时报 `<target> -> <path>`。`host_tools=full` 可跳过 `bin` 白名单裁剪。被删清单（逐项文件数与 MB）写入 `D:\qt\prune-report.txt`，汇总进 `BUILD-INFO.txt` 的 `[裁剪记录]` 段。
 
-裁剪历史实测（旧口径，保留整个 `bin`、`plugins`、`qml`、`metatypes`、`objects-Release`）：1,472 MB → 309.7 MB → 285.1 MB，该口径下 7z `-mx=5` 压缩后 60 MB。新白名单更激进，体积以首轮 CI 的 `[裁剪记录]` 为准（未实测）。
-
-> 产物不是 Windows 桌面开发 SDK：`lib\*.a` 已删、桌面与美术工具已被裁掉，链接桌面程序会失败；host 前缀只用于交叉编译与 `androiddeployqt`。host 默认只含 10 个工具模块（白名单 14 个，见「host 模块集」）。
+> 产物不是 Windows 桌面开发 SDK：未被导入目标引用的 `lib\*.a` 已删、桌面与美术工具已被裁掉，链接桌面程序会失败；host 前缀只用于交叉编译与 `androiddeployqt`。host 默认只含 10 个工具模块（白名单 14 个，见「host 模块集」）。
 
 ## 验证方式
 
@@ -384,11 +380,11 @@ CI 内的自动校验（`scripts/verify-android-prefix.py`）：
 
 > 以上 10 项也是 `Prune host prefix` 步骤的自检项；只看退出码是否等于 `-1073741515`（`STATUS_DLL_NOT_FOUND`）或 `-1073741511`（`STATUS_ENTRYPOINT_NOT_FOUND`）。出现这两个码说明 MinGW 运行库或 `Qt6*.dll` 不在 `host\bin`。
 
-本地（2026-11-04）未跑真正的 Android configure（缺 NDK/SDK）。等价验证：把 target 前缀里的 `Qt6*Tools` 目录移走，仅留 `QT_HOST_PATH=<裁剪后 host>`，并加 `-DQT_REQUIRE_HOST_PATH_CHECK=ON` 强制走交叉编译的 host 解析路径，`find_package(Qt6 COMPONENTS Core Gui Widgets Qml Quick ShaderTools LinguistTools Scxml RemoteObjects)` 与 `qt_add_executable` 均 `Configuring done`。
+本机（2026-11-04，缺 NDK/SDK）只做等价配置验证：移走 target 前缀的 `Qt6*Tools`，仅留 `QT_HOST_PATH=<裁剪后 host>` 并加 `-DQT_REQUIRE_HOST_PATH_CHECK=ON` 强制走交叉编译的 host 解析路径，`find_package(Qt6 COMPONENTS Core Gui Widgets Qml Quick ShaderTools LinguistTools Scxml RemoteObjects)` 与 `qt_add_executable` 均 `Configuring done`。
 
-若要真正跑一次部署，还需要本机 Android SDK + NDK 与 JDK：`androiddeployqt` 会用 target 前缀里的 `jar/Qt6Android.jar` 和 `src/3rdparty/gradle` 的 wrapper 起 Gradle。
+真正跑部署还需要 Android SDK + NDK 与 JDK：`androiddeployqt` 会用 target 前缀里的 `jar/Qt6Android.jar` 和 `src/3rdparty/gradle` 的 wrapper 起 Gradle。
 
-本地只做静态校验（YAML 语法、PowerShell/Python 语法）；Qt 编译由 CI 执行。
+本机只做静态校验（YAML、PowerShell/Python 语法）；Qt 编译由 CI 执行。
 
 ## 显式关闭的特性（不依赖 runner 预装软件）
 
@@ -485,17 +481,17 @@ armv7 额外注意：
 
 1. **直调 CMake 取代 `configure.bat`**：Qt 6.12 的 Gradle 校验在 CMake 层，直调一样会触发；还会丢掉 configure 对特性的推导和 `-no-feature-*` 解析。
 2. **自建 OpenSSL/MariaDB 再 `-DMYSQL_INCDIR`**：收益只是多一个 sql 驱动，代价是多两个第三方库的交叉编译。
-3. **把 host 复制进 target 前缀（`qt6_deploy_host.sh` 做法）**：思路更自包含（解压目录整体搬迁，不需要 `QT_HOST_PATH`），但前提与适配性都不满足：
-   - 它依赖 host 全静态（`-static -static-runtime`），所以只复制 `bin`/`libexec`/`lib/cmake`/`*.prl` 就够；本仓库已提供 `host_linkage=static` 作为 opt-in，但默认 `shared`（Qt 官方不建议静态 host 配共享 target，MinGW 静态也不在官方 CI）；默认的共享 host 工具运行期需要 `Qt6*.dll`，自包含要把整份 host 前缀搬进 target。
-   - 自包含会让 target 前缀出现 `.exe`/`.dll`，`verify-android-prefix.py:146` 的 `Windows PE files in target prefix` 计数不再为 0（当前只报告不报错，但会误导“target 是纯 Android 前缀”的校验口径）。
-   - 改写依赖 Qt 内部变量；6.12 仍在，但 `qtbase/cmake/QtPostProcessHelpers.cmake:430` 注明 host path “尚未 relocatable”，Qt 升级后有再次失配的风险。
-   - 收益只是省掉用户传一个 `-DQT_HOST_PATH`，而双前缀方案已通过 configure 模拟；不值得引入未在真机 Android 构建验证的结构改动。
+3. **把 host 复制进 target 前缀（`qt6_deploy_host.sh` 做法）**：更自包含，但不满足前提：
+   - 它依赖 host 全静态（`-static -static-runtime`），只需复制 `bin`/`libexec`/`lib/cmake`/`*.prl`；本仓库默认 `shared`（见「host 链接方式」），共享 host 工具运行期需要 `Qt6*.dll`，自包含就得搬整份前缀。
+   - 自包含会让 target 前缀出现 `.exe`/`.dll`，[verify-android-prefix.py](file:///D:/project/buildQtAndroid/scripts/verify-android-prefix.py#L146) 的 `Windows PE files in target prefix` 计数不再为 0，破坏“target 是纯 Android 前缀”的校验口径。
+   - 改写依赖 Qt 内部变量，`qtbase/cmake/QtPostProcessHelpers.cmake:430` 注明 host path “尚未 relocatable”，Qt 升级后有失配风险。
+   - 收益只是省掉一个 `-DQT_HOST_PATH`，双前缀方案已由 configure 模拟验证，不值得引入未在真机验证的结构改动。
 
-**SSL 取舍（与 Fs 不同）**：Fs 交叉编译静态 OpenSSL 3.0.14 并用 `-DINPUT_openssl=linked` 把 TLS 直接链进 `libQt6Network`；本仓库有意选择 `-openssl-runtime`，头文件取 **3.5.4**（对齐 Qt 6.12 版本页；只解出 `include/openssl`，不建库、不链接、不分发）。**版本与模式都不同，是有意为之**：Fs 钉在 3.0.14 是因为它的静态库要自己交叉编译并随包分发；我们只借头文件做配置期探测，所以跟随 Qt 版本页取 3.5.4。理由：不给 prefix 绑定某个 OpenSSL 版本（升级 OpenSSL 不用重编 Qt）、不引入第二条交叉编译链（Windows runner 上编 OpenSSL 需要 msys2+perl）。代价：下游必须自带 `libssl_3.so`/`libcrypto_3.so`、文件名后缀要对上（或设 `ANDROID_OPENSSL_SUFFIX`）、TLS 缺失只在运行时暴露（`QSslSocket::supportsSsl()` 为 false）。用法见「下游如何用 TLS」。
+**SSL 取舍（与 Fs 不同）**：Fs 交叉编译静态 OpenSSL 3.0.14 并用 `-DINPUT_openssl=linked` 把 TLS 链进 `libQt6Network`；本仓库选 `-openssl-runtime` + 头文件 **3.5.4**（对齐 Qt 6.12 版本页，只解出 `include/openssl`，不建库、不链接、不分发）。理由：prefix 不绑定 OpenSSL 版本（升级无需重编 Qt）、不引入第二条交叉编译链。代价：下游自带 `libssl_3.so`/`libcrypto_3.so` 且后缀要对上（或设 `ANDROID_OPENSSL_SUFFIX`），TLS 缺失只在运行时暴露。用法见「下游如何用 TLS」。
 
-其压缩参数 `-m0=LZMA2:d256m:fb273 -mmt=3 -myx -mqs -ms=on` 未采纳：本机 `7zr` 不接受 `d256m` 语法，无法对比。本仓库改用 7z 的 `-mx=9 -ms=on`（LZMA2 256MB 字典 + solid），压缩率对齐 Fs 产物的 ~9.7x（旧 `-mx=5` 为 5.5x）；按 275 MB 的整包实测基准推算，整包约 100–130 MB（推断，不是实测），代价是打包耗时从约 4 分钟升到 10–15 分钟。
+其压缩参数 `-m0=LZMA2:d256m:fb273 -mmt=3 -myx -mqs -ms=on` 未采纳（本机 `7zr` 不接受 `d256m` 语法）；本仓库用 `-mx=9 -ms=on`，压缩率对齐 Fs 产物的 ~9.7x（旧 `-mx=5` 为 5.5x），按 275 MB 基准推算整包约 100–130 MB（推断），打包耗时从约 4 分钟升到 10–15 分钟。
 
-一处可借鉴但未落地的细节：它对 Android 显式传 `-DCMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH=ON`。该变量默认即为 ON，显式写只是自证，不会改变宿主机探测行为，因此不改。
+它对 Android 显式传 `-DCMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH=ON`，该变量默认即 ON，显式写只是自证，本仓库不写。
 
 ## 与官方文档对齐（Qt 6.12）
 
@@ -608,7 +604,7 @@ Qt 6.12 里 Android 的 `Qt6Android.jar` 由源码树内的 Gradle 工程构建�
 - **host 每轮必编**：全模块实测 2 小时 41 分 48 秒，仅 host 前缀缓存命中才跳过；缓存 key 任一组成（版本/skip/linkage/host_set/MinGW/CMake）变化、裁剪白名单变化后未 bump `-vN`，或 `.cache-ok` 标识不符，都会整段重编。
 - artifact 为未签名的 Qt 前缀，不含 APK，不含 Android 签名材料。
 - artifact 中的 host 前缀已按白名单裁剪（顶层只留 `bin`/`lib`/`mkspecs`/`metatypes`，`bin` 只留工具白名单），旧口径实测 1,472 MB → 285.1 MB（7z 后 60 MB）；新口径体积待首轮 CI 的 `[裁剪记录]`。只够交叉编译与 `androiddeployqt` 部署，需要桌面 Qt 开发能力时不要用它。
-- **裁剪风险**：被排除的工具（windeployqt/wasmdeployqt/harmonydeployqt、qdbus 系列、qhelpgenerator、3D 美术工具等）多数仍是 `Qt6*ToolsTargets` 的导入目标，对应组件的 `find_package` 可能报 *"The imported target ... references the file ... but this file does not exist"*；`host_tools=full` 是一键排除开关。
+- **裁剪风险**：白名单以导入目标 `IMPORTED_LOCATION` 为准（含静态库），被排除名单里仍是导入目标的会被保留；风险只剩“host 未编该模块”（`find_package(Qt6 COMPONENTS <Module>)` 时 `Qt6<Module>Tools` 缺失），用 `host_modules` 补模块解决。
 - 默认 `skip_modules` 关闭 `qtgrpc`/`qtserialbus`/`qtscxml`/`qtopcua`/`qtremoteobjects`/`qtactiveqt`/`qtwayland`/`qttasktree`/`qtcoap`/`qtwebchannel`、PrintSupport/SpatialAudio，以及 TIFF 图像格式（保留 png/jpeg/webp/svg/ico/gif）；需要其中任一功能时，从默认值里删掉对应 token 重跑（host 侧会随 `auto` 自动把所需模块加回）。
 - 图像格式的残留：`bmp`/`ppm`/`xbm`/`xpm` 内建在 QtGui，`tga`/`wbmp`/`icns` 插件没有独立 feature，这 7 个无法用 configure 关闭；只有靠改 qtimageformats 源码（删 `add_subdirectory(tga|wbmp|icns)`）才能去掉，默认不做源码补丁。详见「图像格式」。
 - host 白名单有 14 个模块，按默认 `skip_modules` 过滤后实际编 10 个（`qtbase`/`qtsvg`/`qtdeclarative`/`qtshadertools`/`qttools`/`qtquick3d`/`qtquick3dphysics`/`qtquicktimeline`/`qtlottie`/`qtcanvaspainter`）；工程用到白名单外的模块工具时 configure 会失败，需加进 `host_modules`。
