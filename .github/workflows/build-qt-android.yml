@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       qt_version:
-        description: "Qt 源码版本（默认 6.12.0）"
+        description: "Qt 源码版本（默认 6.12.1）"
         required: false
-        default: "6.12.0"
+        default: "6.12.1"
       openssl_version:
         description: "OpenSSL 源码版本（只解出 include/openssl 供 runtime SSL 用，默认 3.5.4，对齐 Qt 6.12 Tools and Versions）"
         required: false
@@ -68,7 +68,7 @@ jobs:
     runs-on: ${{ inputs.runner || 'windows-2022' }}
     timeout-minutes: 360
     env:
-      QT_VERSION: ${{ inputs.qt_version || '6.12.0' }}
+      QT_VERSION: ${{ inputs.qt_version || '6.12.1' }}
       OPENSSL_VERSION: ${{ inputs.openssl_version || '3.5.4' }}
       QT_SKIP_MODULES: ${{ inputs.skip_modules || 'qtwebengine qtgrpc qtserialbus qtscxml qtopcua qtremoteobjects qtactiveqt qtwayland qttasktree qtcoap qtwebchannel -no-feature-printsupport -no-feature-spatialaudio -no-feature-tiff' }}
       HOST_MODULES: ${{ inputs.host_modules || 'auto' }}
@@ -88,8 +88,8 @@ jobs:
       TARGET_PREFIX: D:\qt\android_${{ inputs.abi || 'arm64-v8a' }}
       TOOLS_DIR: C:\tools
       ANDROID_SDK_ROOT: C:\android\sdk
-      ANDROID_NDK_ROOT: C:\android\ndk\android-ndk-r27c
-      NDK_VERSION: r27c
+      ANDROID_NDK_ROOT: C:\android\ndk\android-ndk-r30
+      NDK_VERSION: r30
       SDK_PLATFORM: android-37.0
       SDK_BUILD_TOOLS: 37.0.0
       CMDLINE_TOOLS_VERSION: "19.0"
@@ -380,7 +380,7 @@ jobs:
           Write-Output "OpenSSL headers: $env:OPENSSL_VERSION ($count headers) -> $includeDir"
           "T_OPENSSL_HEADERS=$([int]((Get-Date) - $started).TotalSeconds)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: Install Android SDK 19.0 / platform 37.0 / build-tools 37.0.0 / NDK r27c
+      - name: Install Android SDK 19.0 / platform 37.0 / build-tools 37.0.0 / NDK r30
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -405,7 +405,7 @@ jobs:
 
           if (-not (Test-Path "$env:ANDROID_NDK_ROOT\source.properties")) {
             $ndkZip = "$env:TOOLS_DIR\ndk.zip"
-            Get-File 'https://dl.google.com/android/repository/android-ndk-r27c-windows.zip' $ndkZip
+            Get-File 'https://dl.google.com/android/repository/android-ndk-r30-windows.zip' $ndkZip
             New-Item -ItemType Directory -Force -Path 'C:\android\ndk' | Out-Null
             & $env:SEVEN_ZIP x -y "-oC:\android\ndk" $ndkZip
             if ($LASTEXITCODE -ne 0) { throw 'NDK 解压失败' }

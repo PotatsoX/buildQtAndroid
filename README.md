@@ -16,11 +16,11 @@
 
 ## 工具链版本（Qt 6.12 官方要求）
 
-来源：<https://wiki.qt.io/Qt_6.12_Tools_and_Versions>（页面标题 *Software configurations for Qt 6.12.0*），取 **Windows 11 24H2 x86_64** 列。
+来源：<https://wiki.qt.io/Qt_6.12_Tools_and_Versions>（6.12.1 段落），取 **Windows 11 24H2 x86_64** 列；6.12.1 相对 6.12.0 的 Android 构建链唯一变化是 **NDK r27c → r30**。
 
 | 组件 | 版本 | 说明 |
 |---|---|---|
-| Android NDK | **r27c** | 直接使用 Google 官方 zip，`android-ndk-r27c` |
+| Android NDK | **r30** | 直接使用 Google 官方 zip，`android-ndk-r30`；对应 Qt 6.12.1 版本页 |
 | SDK Platform | **android-37.0** | `sdkmanager "platforms;android-37.0"` |
 | Build Tools | **37.0.0** | 仅安装该版本，避免 Qt 自动选到更高版本 |
 | SDK Command-line Tools | **19.0** | `commandlinetools-win-13114758_latest.zip` |
@@ -50,7 +50,7 @@
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
-| `qt_version` | `6.12.0` | 源码版本，下载 `qt-everywhere-src-<ver>.zip`；必须是 `x.y.z`，在 `Compute cache key suffix` 步骤校验 |
+| `qt_version` | `6.12.1` | 源码版本，下载 `qt-everywhere-src-<ver>.zip`；必须是 `x.y.z`，在 `Compute cache key suffix` 步骤校验 |
 | `openssl_version` | `3.5.4` | 只用于下载 OpenSSL 源码包并生成 `include/openssl` 下的实体头文件（runtime SSL 的头文件依赖）；必须是 `x.y.z`；改动会同时换掉头文件缓存 key |
 | `skip_modules` | `qtwebengine` + 10 模块 + 3 feature | 空格/逗号分隔：模块名传给 configure `-skip`；以 `-` 开头的原样传给 target configure（如 `-no-feature-printsupport`）。默认另含 `-no-feature-tiff`，保留 png/jpeg/webp/svg/ico/gif。完整默认值见「模块选择机制」 |
 | `host_modules` | `auto` | host 阶段编译的模块集：`auto` = 白名单 ∩ target 实际构建的模块；`all` = 全量（只减去 `skip_modules` 里的模块名）；也可给逗号分隔的模块名，未知模块直接报错且必须包含 `qtbase` |
@@ -262,7 +262,7 @@ host 侧参数（`-platform win32-g++`、`-qt-zlib`、`-schannel` 等）只用�
 
 | 缓存 | key |
 |---|---|
-| 源码归档（约 605 MB） | `qt-src-zip-<qt_version>-v1` |
+| 源码归档（6.12.1 约 579 MB） | `qt-src-zip-<qt_version>-v1` |
 | Android SDK/NDK（约 3 GB） | `android-<ndk>-<platform>-<build-tools>-<cmdline>-v1` |
 | Gradle home（推断 1–2 GB） | `gradle-qt<qt_version>-bt<build-tools>-v1` |
 | host 前缀（未裁剪约 1.4 GB） | `qt-host-build-<qt_version>-<skip_key>-<linkage>-hostset<host_set>-mingw<ver>-cmake<ver>-v2`；`auto` 时 `<host_set>` 为白名单内容的 8 位散列 |
@@ -294,7 +294,7 @@ host 与 target 用同一份源码、在同一次 run 里构建（host 是 MinGW
 # 保持两者同级且不改名：target 前缀里的相对路径会自己找到 host\
 cmake -S <your-app> -B build `
   -DCMAKE_TOOLCHAIN_FILE="D:\qt\android_<abi>\lib\cmake\Qt6\qt.toolchain.cmake" `
-  -DANDROID_NDK_ROOT="C:\android\ndk\android-ndk-r27c" `
+  -DANDROID_NDK_ROOT="C:\android\ndk\android-ndk-r30" `
   -DANDROID_SDK_ROOT="C:\android\sdk" `
   -DCMAKE_PREFIX_PATH="D:\qt\android_<abi>"
 # 可选：host 放到别处时再显式指定 -DQT_HOST_PATH="<...>\host"
@@ -366,11 +366,11 @@ CI 内的自动校验（`scripts/verify-android-prefix.py`）：
 拿到 7z 后逐条确认 host 前缀可用（解压目录设为 `D:\qt`）：
 
 ```powershell
-& "D:\qt\host\bin\qmake.exe" -query QT_VERSION          # 6.12.0
-& "D:\qt\host\bin\moc.exe" --version                    # moc 6.12.0
+& "D:\qt\host\bin\qmake.exe" -query QT_VERSION          # 6.12.1
+& "D:\qt\host\bin\moc.exe" --version                    # moc 6.12.1
 & "D:\qt\host\bin\rcc.exe" --help
 & "D:\qt\host\bin\uic.exe" --help
-& "D:\qt\host\bin\qsb.exe" --version                    # qsb 6.12.0
+& "D:\qt\host\bin\qsb.exe" --version                    # qsb 6.12.1
 & "D:\qt\host\bin\qmltyperegistrar.exe" --help
 & "D:\qt\host\bin\qmlcachegen.exe" --help
 & "D:\qt\host\bin\qmlimportscanner.exe"                 # 无参会打印用法
@@ -423,7 +423,7 @@ GitHub `windows-2022` 镜像预装了大量 SDK。Qt 的 `configure` 对这些 S
 
 | 工具 | 官方 CI（Windows 11 24H2 x86_64 列） | 本工作流 | 处理 |
 |---|---|---|---|
-| NDK / SDK platform / build-tools / cmdline-tools | r27c / android-37.0 / 37.0.0 / 19.0 | 同 | 一致 |
+| NDK / SDK platform / build-tools / cmdline-tools | r30 / android-37.0 / 37.0.0 / 19.0 | 同 | 一致 |
 | CMake / Ninja / JDK / MinGW / 7-Zip / OpenSSL | 4.3.2 / 1.10.2 / 21.0.9 / 15.1.0(posix-seh-msvcrt-rt_v12) / 24.09 / 3.5.4 | CMake/Ninja/JDK/7-Zip 同；MinGW 15.1.0 在 host 步骤内下载（复用官方 CI 版本）；OpenSSL 3.5.4 仅头文件（官方 CI 行为完整 OpenSSL 3.5.4） | 版本一致：host 与官方 CI 用同一编译器版本，OpenSSL 同版本（我们只取头文件） |
 | Python | 3.8.1 | 3.11.9 | 保留：3.8.1 已 EOL，且 setup-python 清单里仅旧补丁版本；Qt 构建脚本两者兼容 |
 | Perl (strawberry) | 5.32.0.1 | 5.42.2.1 | 保留：GitHub 上没有 5.32.0.1 的 portable 资产（实测未找到） |
@@ -466,7 +466,7 @@ armv7 额外注意：
 
 | 维度 | Fs-scripts | 本仓库 | 判断 |
 |---|---|---|---|
-| Qt 版本上限 | 6.7.2（另有 6.2.9/6.5.3/5.15.14） | 6.12.0 | 它早于 Qt 的 Gradle 化 jar，Gradle 这块没有可借鉴内容 |
+| Qt 版本上限 | 6.7.2（另有 6.2.9/6.5.3/5.15.14） | 6.12.1 | 它早于 Qt 的 Gradle 化 jar，Gradle 这块没有可借鉴内容 |
 | 工具链来源 | 本机固定路径 `D:\android-sdk-windows-20240205`、`D:\android-ndk-r26d`、OpenJDK 11、CMake 3.29（`Configuration.lua:52-79`、`:392-395`） | runner 上 `sdkmanager`/7z 安装，版本钉死 | 它预置即用；不适配 hosted runner |
 | host Qt | 下载其 Jenkins 产出的静态 host Qt（`hostToolsUrlwin`，`qtCompile_conf.lua:7276`），`-DFEATURE_relocatable=ON`（`:6289` 段） | 本工作流从源码自建（默认 `shared`，可 `host_linkage=static` opt-in）+ Actions 缓存 | 它直接用 Jenkins 预编译 host；我们自建，靠缓存避免重编 |
 | target 参数 | 直调 CMake：`-DQT_HOST_PATH`、`-DANDROID_ABI`、`-DANDROID_PLATFORM=27`、`-DBUILD_qtwebengine=OFF`、`-DFEATURE_icu=OFF`、`-DFEATURE_ssl=ON` + `-DINPUT_openssl=linked` + 自建静态 OpenSSL 3.0.14、`-DMYSQL_INCDIR` | `configure.bat` + `-android-abis` + `-no-feature-sql-*` + `-openssl-runtime`（只生成 OpenSSL 3.5.4 头文件，不建库、不链接） | SSL 取舍不同：它静态链进 `libQt6Network`，我们让下游自带库（见下） |
