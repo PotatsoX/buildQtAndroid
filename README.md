@@ -108,6 +108,7 @@ Android 构建文件：`.github/workflows/build-qt-android.yml`；完整桌面�
 - **Qt 5.15.19 + MSVC 2026 不是 Qt 官方支持组合**（Qt 5.15 官方支持到 MSVC 2019）；mkspec 没有硬编码的 `MSC_VER` 上限，但如遇编译错误，请改用 `qt5-mingw810_64` 或自行调整。
 - Qt 5.15.19 源码包在 `archive/qt/5.15/5.15.19`，约 1.13 GB；Qt 6.12.1 在 `official_releases/qt/6.12/6.12.1`，约 579 MB。标准 runner 的 D: 盘约 14 GB，完整 debug+release 构建可能接近上限；源码归档有缓存，构建目录安装后不清理也可手动删除。
 - Qt 6 的 `-debug-and-release` 只在多配置生成器下生效：configure 检测到 `ninja` 且需要 debug+release 时会自动使用 `Ninja Multi-Config`，安装时分别对 `Debug`/`Release` 执行 `cmake --install`。
+- MSVC + `shared-debug-and-release` 会在构建过程中运行 Debug 版 `rcc`/`moc`/`uic`：除 vcvars 外，还把 VS 的 `debug_nonredist` 与 Windows SDK 的 `ucrtbased.dll` 目录放进 PATH，并把 `build/qtbase/{bin,lib}/{Debug,Release}` 放进 PATH，避免 `0xc0000135`（DLL not found）。
 - 所有可选 `curl` 下载后都会清零 `$LASTEXITCODE`，避免 404（例如缺失的 md5sums）让 PowerShell 步骤误判失败。
 
 ## 工作流使用的 Action 版本

@@ -203,6 +203,19 @@ jobs:
               "$key=$value" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
             }
           }
+          # Debug 版 Qt 工具（rcc/moc/uic）需要调试 CRT：vcvars 不会把 debug_nonredist
+          # 与 ucrtbased.dll 所在目录加进 PATH，缺失时 rcc.exe 会以 0xc0000135 退出。
+          $debugDirs = @()
+          $debugDirs += Get-ChildItem 'C:\Program Files\Microsoft Visual Studio\18\*\VC\Redist\MSVC\*\debug_nonredist\x64\Microsoft.*' -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
+          $debugDirs += Get-ChildItem 'C:\Program Files (x86)\Microsoft Visual Studio\18\*\VC\Redist\MSVC\*\debug_nonredist\x64\Microsoft.*' -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
+          $debugDirs += Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\*\x64\ucrtbased.dll' -File -ErrorAction SilentlyContinue | ForEach-Object { $_.Directory.FullName }
+          $debugDirs += Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\*\ucrt\x64\ucrtbased.dll' -File -ErrorAction SilentlyContinue | ForEach-Object { $_.Directory.FullName }
+          $debugDirs += Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Redist\ucrt\DLLs\x64\ucrtbased.dll' -File -ErrorAction SilentlyContinue | ForEach-Object { $_.Directory.FullName }
+          $debugDirs = @($debugDirs | Where-Object { $_ } | Select-Object -Unique)
+          if ($debugDirs.Count -eq 0) { Write-Warning '未找到 MSVC 调试运行库目录；Debug 版 Qt 工具可能以 0xc0000135 失败' }
+          Write-Output "Debug CRT dirs: $($debugDirs -join '; ')"
+          $newPath = @($debugDirs) + $newPath
+
           if ($newPath.Count -gt 0) {
             # GITHUB_PATH 只对后续 step 生效；当前 step 也要立刻能看到 cl.exe
             $env:Path = (($newPath + ($env:Path -split ';')) | Where-Object { $_ } | Select-Object -Unique) -join ';'
@@ -289,6 +302,14 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $prefix = Join-Path $env:PREFIX $env:COMPILER
           New-Item -ItemType Directory -Force -Path $prefix | Out-Null
+          # Ninja 会直接调用 build/qtbase/bin/<Config> 下的 rcc/moc/uic；它们依赖同配置的 Qt6*.dll（在 lib/<Config>）。
+          # 这些目录不在默认 PATH 里，缺失时表现为 0xc0000135（DLL not found）。
+          $qtBuildBins = @(
+            "$env:BUILD_DIR\qtbase\lib\Debug", "$env:BUILD_DIR\qtbase\bin\Debug",
+            "$env:BUILD_DIR\qtbase\lib\Release", "$env:BUILD_DIR\qtbase\bin\Release",
+            "$env:BUILD_DIR\qtbase\lib", "$env:BUILD_DIR\qtbase\bin"
+          )
+          $env:Path = (($qtBuildBins + ($env:Path -split ';')) | Where-Object { $_ } | Select-Object -Unique) -join ';'
           $skip = @($env:SKIP_MODULES -split '[\s,]+' | Where-Object { $_ })
           $cfg = @('-opensource', '-confirm-license', '-prefix', $prefix)
           if ($env:LINKAGE -eq 'static-release') {
