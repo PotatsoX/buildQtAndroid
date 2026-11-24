@@ -101,7 +101,7 @@ Android 构建文件：`.github/workflows/build-qt-android.yml`；完整桌面�
 | `skip_modules` | `qtwebengine` | 空格分隔的模块名，逐个转成 `-skip <模块>`；留空即尝试完整构建。QtWebEngine 在 MinGW 下不受官方支持，且会显著拉长构建时间，故默认跳过 |
 | `make_examples_tests` | `false` | `true` 时去掉 `-nomake examples -nomake tests` |
 
-流程：准备矩阵 → 缓存源码归档（`qt-desktop-src-<版本>-v1`）→ 安装 Python 3.11.9 / CMake 4.3.2 / Ninja 1.10.2 / Strawberry Perl 5.42.2.1 / 对应 MinGW（MSVC 由 `ilammy/msvc-dev-cmd` 用 VS 18.0 初始化 x64 环境）→ 下载解压 Qt 源码 → configure / build / install 到 `D:\qt-desktop\install\<compiler>` → 写 `BUILD-INFO.txt` → 7z 打包并上传 artifact `Qt_<版本>-<链接方式>_<编译器>`。推送 `qt-desktop-*` tag 时会额外发布 Release 附件。
+流程：准备矩阵 → 缓存源码归档（`qt-desktop-src-<版本>-v1`）→ 安装 Python 3.11.9 / CMake 4.3.2 / Ninja 1.10.2 / Strawberry Perl 5.42.2.1 / 对应 MinGW（MSVC 由 `ilammy/msvc-dev-cmd` 用 VS 18.0 初始化 x64 环境）→ 下载解压 Qt 源码（MSVC 直接调用 VS 2026 的 `vcvars64.bat` 初始化 x64 环境；`ilammy/msvc-dev-cmd` 的 vswhere 版本区间 18.0–18.9 匹配不到 18.12，故不使用）→ configure / build / install 到 `D:\qt-desktop\install\<compiler>` → 写 `BUILD-INFO.txt` → 7z 打包并上传 artifact `Qt_<版本>-<链接方式>_<编译器>`。推送 `qt-desktop-*` tag 时会额外发布 Release 附件。
 
 注意事项：
 
@@ -122,7 +122,6 @@ Android 构建文件：`.github/workflows/build-qt-android.yml`；完整桌面�
 | `actions/setup-python` | v6.3.0 | [v6.3.0 action.yml](https://github.com/actions/setup-python/blob/v6.3.0/action.yml) | `python-version`/`architecture` 未变 |
 | `actions/upload-artifact` | v7.0.2 | [v7.0.2 action.yml](https://github.com/actions/upload-artifact/blob/v7.0.2/action.yml) | `name`/`path`/`compression-level`/`retention-days` 未变 |
 | `softprops/action-gh-release` | v3.0.3 | [v3.0.3 action.yml](https://github.com/softprops/action-gh-release/blob/v3.0.3/action.yml) | `files` 与 v2 兼容 |
-| `ilammy/msvc-dev-cmd` | v1.13.0 | [v1.13.0 action.yml](https://github.com/ilammy/msvc-dev-cmd/blob/v1.13.0/action.yml) | 桌面 workflow 用 `arch: x64`、`vsversion: 18.0`（VS 2026；该 action 的年份表只到 2022，但版本号可直接传入并由 vswhere 匹配 18.x） |
 
 `actions/download-artifact` 未使用（若将来引入，v5 的单 ID 下载路径已从 `path/<name>/` 改为 `path/`，v8 起哈希不匹配默认报错）。
 

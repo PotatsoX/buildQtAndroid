@@ -118,12 +118,41 @@ jobs:
           python-version: "3.11.9"
           architecture: x64
 
+      # 不依赖 ilammy/msvc-dev-cmd：该 action 的 vswhere 版本区间上限是 18.9，
+      # 匹配不到 VS 2026 的 18.12.x；标准路径又只试 18.0\（实际安装目录是 18\）。
       - name: Set up MSVC 2026 (x64)
         if: matrix.toolchain == 'msvc'
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
-          vsversion: "18.0"
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vcvars = Get-ChildItem 'C:\Program Files\Microsoft Visual Studio\18\*\VC\Auxiliary\Build\vcvars64.bat' -ErrorAction SilentlyContinue |
+            Sort-Object FullName | Select-Object -First 1
+          if (-not $vcvars) { throw '未找到 VS 2026 的 vcvars64.bat（预期在 C:\Program Files\Microsoft Visual Studio\18\<Edition>\VC\Auxiliary\Build）' }
+          Write-Output "vcvars64: $($vcvars.FullName)"
+          $lines = & cmd.exe /c "`"$($vcvars.FullName)`" x64 && set"
+          if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0; throw 'vcvars64.bat 执行失败' }
+
+          $before = [System.Collections.Generic.Dictionary[string,string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+          Get-ChildItem Env: | ForEach-Object { $before[$_.Name] = $_.Value }
+
+          $newPath = @()
+          foreach ($line in $lines) {
+            if ($line -notmatch '^([^=]+)=(.*)$') { continue }
+            $key, $value = $Matches[1], $Matches[2]
+            if ($key -eq 'Path') {
+              $newPath = @($value -split ';' | Where-Object { $_ -and ($before['Path'] -notlike "*$_*") })
+              continue
+            }
+            if ($key -match '^(GITHUB_|RUNNER_|ACTIONS_|CI$|PWD$|SHLVL$|PSModulePath$|TERM$|TZ$)') { continue }
+            if (-not $before.ContainsKey($key) -or $before[$key] -ne $value) {
+              "$key=$value" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            }
+          }
+          if ($newPath.Count -gt 0) { $newPath | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8 }
+          $global:LASTEXITCODE = 0
+          & cl.exe /? | Select-Object -First 1
+          if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0; throw 'cl.exe 不可用' }
+          $global:LASTEXITCODE = 0
 
       - name: Install build tools (CMake / Ninja / Perl / MinGW)
         shell: pwsh
