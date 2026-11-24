@@ -148,7 +148,11 @@ jobs:
               "$key=$value" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
             }
           }
-          if ($newPath.Count -gt 0) { $newPath | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8 }
+          if ($newPath.Count -gt 0) {
+            # GITHUB_PATH 只对后续 step 生效；当前 step 也要立刻能看到 cl.exe
+            $env:Path = (($newPath + ($env:Path -split ';')) | Where-Object { $_ } | Select-Object -Unique) -join ';'
+            $newPath | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          }
           $global:LASTEXITCODE = 0
           & cl.exe /? | Select-Object -First 1
           if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0; throw 'cl.exe 不可用' }
