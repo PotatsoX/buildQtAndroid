@@ -109,6 +109,8 @@ Android 构建文件：`.github/workflows/build-qt-android.yml`；完整桌面�
 - Qt 5.15.19 源码包在 `archive/qt/5.15/5.15.19`，约 1.13 GB；Qt 6.12.1 在 `official_releases/qt/6.12/6.12.1`，约 579 MB。标准 runner 的 D: 盘约 14 GB，完整 debug+release 构建可能接近上限；源码归档有缓存，构建目录安装后不清理也可手动删除。
 - Qt 6 的 `-debug-and-release` 只在多配置生成器下生效：configure 检测到 `ninja` 且需要 debug+release 时会自动使用 `Ninja Multi-Config`，安装时分别对 `Debug`/`Release` 执行 `cmake --install`。
 - MSVC + `shared-debug-and-release` 会在构建过程中运行 Debug 版 `rcc`/`moc`/`uic`：除 vcvars 外，还把 VS 的 `debug_nonredist` 与 Windows SDK 的 `ucrtbased.dll` 目录放进 PATH，并把 `build/qtbase/{bin,lib}/{Debug,Release}` 放进 PATH，避免 `0xc0000135`（DLL not found）。
+- MSVC 目标 configure 必须传 `-platform win32-msvc`（由矩阵 `platform` 提供），Qt 靠它推导编译器为 `cl`；不能用 `-DCMAKE_CXX_COMPILER=cl.exe`（configure.bat 会把它转成编译宏），否则 CMake 会误选 PATH 里的 clang（VS2026 的 vcvars 会加入 clang），触发 STL1009 / WinRT 私有头缺失。MSVC 初始化步骤额外固定 `CC=CXX=cl` 作为双保险。
+- Qt 6.12.1 + `Ninja Multi-Config` 的已知缺陷：部分自包含 QML 工具模块（如 `qmltime`）的 `.qmltypes` 生成目标未纳入构建图，但 install 规则仍引用它，导致 `file(INSTALL) cannot find ...: File exists`（该报错里的 `File exists` 是残留 errno，真实原因是文件缺失）。构建脚本在所有配置编译完成后、install 前扫描 install 脚本并为缺失的 `.qmltypes` 补最小占位文件；同时先把 `Debug`/`Release` 都编译完再统一安装。
 - 所有可选 `curl` 下载后都会清零 `$LASTEXITCODE`，避免 404（例如缺失的 md5sums）让 PowerShell 步骤误判失败。
 
 ## 工作流使用的 Action 版本

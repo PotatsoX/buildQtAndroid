@@ -317,6 +317,31 @@ jobs:
             "$env:BUILD_DIR\qtbase\lib", "$env:BUILD_DIR\qtbase\bin"
           )
           $env:Path = (($qtBuildBins + ($env:Path -split ';')) | Where-Object { $_ } | Select-Object -Unique) -join ';'
+
+          # Qt 6.12.1 在 Ninja Multi-Config + -debug-and-release 下，部分自包含 QML
+          # 工具模块（已知 qmltime）的 .qmltypes 生成目标未纳入构建图，但 install
+          # 规则仍引用它，导致 file(INSTALL) 因源文件缺失而失败（报错里的
+          # "File exists" 只是残留 errno，真实原因是文件不存在）。
+          # 扫描所有 install 脚本，为缺失的 .qmltypes 补一个最小合法占位文件。
+          function Ensure-QmltimeTypes {
+            $fixed = 0
+            $scripts = Get-ChildItem -LiteralPath $env:BUILD_DIR -Filter 'cmake_install.cmake' -Recurse -File -ErrorAction SilentlyContinue
+            foreach ($s in $scripts) {
+              $content = Get-Content -LiteralPath $s.FullName -Raw -Encoding UTF8
+              foreach ($m in [regex]::Matches($content, '"([^"]+\.qmltypes)"')) {
+                $p = $m.Groups[1].Value
+                if (-not (Test-Path -LiteralPath $p)) {
+                  $dir = Split-Path -Parent $p
+                  New-Item -ItemType Directory -Force -Path $dir | Out-Null
+                  @('import QtQml', 'Module {', '    name: "QmlTime"', '    isComposite: true', '}') | Out-File -FilePath $p -Encoding ascii
+                  Write-Output "补齐缺失 qmltypes: $p"
+                  $fixed++
+                }
+              }
+            }
+            Write-Output "qmltypes 占位补齐: $fixed 个"
+          }
+
           $skip = @($env:SKIP_MODULES -split '[\s,]+' | Where-Object { $_ })
           # Qt6 configure 依赖 -platform <mkspec> 来推导编译器（win32-msvc -> cl，win32-g++ -> g++）。
           # 不能用 -DCMAKE_CXX_COMPILER=cl.exe：configure.bat 会把 -D 收进 QT_EXTRA_DEFINES（编译宏），
@@ -342,15 +367,21 @@ jobs:
             & (Join-Path $env:QT_SRC 'configure.bat') @cfg
             if ($LASTEXITCODE -ne 0) { throw "Qt6 configure 失败" }
             if ($env:LINKAGE -eq 'shared-debug-and-release') {
+              # 先把所有配置都编译完，再统一安装。避免某个配置独占生成的文件
+              # （如 qmltypes）在另一个配置的 install 阶段还没就绪。
               foreach ($config in @('Debug', 'Release')) {
                 & cmake --build . --config $config --parallel
                 if ($LASTEXITCODE -ne 0) { throw "Qt6 编译失败 ($config)" }
+              }
+              Ensure-QmltimeTypes
+              foreach ($config in @('Debug', 'Release')) {
                 & cmake --install . --config $config
                 if ($LASTEXITCODE -ne 0) { throw "Qt6 安装失败 ($config)" }
               }
             } else {
               & cmake --build . --parallel
               if ($LASTEXITCODE -ne 0) { throw "Qt6 编译失败" }
+              Ensure-QmltimeTypes
               & cmake --install .
               if ($LASTEXITCODE -ne 0) { throw "Qt6 安装失败" }
             }
