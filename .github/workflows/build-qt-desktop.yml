@@ -411,15 +411,62 @@ jobs:
           $lines | Out-File -FilePath (Join-Path $env:QT_PREFIX 'BUILD-INFO.txt') -Encoding utf8 -Append
           $global:LASTEXITCODE = 0
 
+      - name: Free disk space before packaging
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Show-FreeSpace([string]$stage) {
+            $d = Get-PSDrive D
+            Write-Output "[$stage] D: free $([math]::Round($d.Free/1GB,2)) GB / used $([math]::Round($d.Used/1GB,2)) GB"
+          }
+          Show-FreeSpace 'before cleanup'
+          function Remove-Tree([string]$dir) {
+            if (-not (Test-Path -LiteralPath $dir)) { return }
+            Write-Output "removing $dir"
+            Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $dir) {
+              # Qt 构建目录里常有超过 MAX_PATH 的嵌套路径；robocopy 空目录镜像比
+              # Remove-Item 更能可靠清空这种目录树。
+              $empty = Join-Path $env:WORK_ROOT '__empty'
+              New-Item -ItemType Directory -Force -Path $empty | Out-Null
+              & robocopy $empty $dir /MIR /NFL /NDL /NJH /NJS /NP /R:0 /W:0 | Out-Null
+              $global:LASTEXITCODE = 0
+              Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            if (Test-Path -LiteralPath $dir) { Write-Warning "无法删除 $dir；磁盘空间可能仍然不足" }
+          }
+          # install 完成后 build 树与源码树都不再需要。Qt6 debug+release 全量构建
+          # 的 build 目录通常十几 GB，是 7z 阶段 "There is not enough space on the disk"
+          # 的主要原因；源码压缩包仍在 ARCHIVE_DIR 缓存里，不影响后续复用。
+          foreach ($dir in @($env:BUILD_DIR, $env:QT_SRC, "$env:TOOLS_DIR\cmake-tmp")) {
+            Remove-Tree $dir
+          }
+          foreach ($pattern in @('*.zip', '*.7z')) {
+            Get-ChildItem -Path $env:TOOLS_DIR -Filter $pattern -File -ErrorAction SilentlyContinue |
+              Remove-Item -Force -ErrorAction SilentlyContinue
+          }
+          Show-FreeSpace 'after cleanup'
+          $global:LASTEXITCODE = 0
+
       - name: Package artifact
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          $outdir = Join-Path $env:WORK_ROOT 'artifacts'
+          New-Item -ItemType Directory -Force -Path $outdir | Out-Null
           $name = "Qt_${env:QT_VERSION}-${env:LINKAGE}_${env:COMPILER}.7z"
-          & 7z a -t7z -mx=9 $name "$env:QT_PREFIX"
+          $archive = Join-Path $outdir $name
+          $freeGB = [math]::Round((Get-PSDrive D).Free/1GB, 2)
+          $srcGB = [math]::Round(((Get-ChildItem -LiteralPath $env:QT_PREFIX -Recurse -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum)/1GB, 2)
+          Write-Output "打包前检查: 安装目录 ${srcGB} GB, D: 可用 ${freeGB} GB"
+          if ($freeGB -lt ($srcGB * 1.2 + 2)) {
+            throw "D: 可用空间不足（安装目录 ${srcGB} GB，可用 ${freeGB} GB），无法创建压缩包"
+          }
+          & 7z a -t7z -mx=7 $archive "$env:QT_PREFIX"
           if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0; throw "打包失败" }
           $global:LASTEXITCODE = 0
-          "ARTIFACT=$name" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Get-Item -LiteralPath $archive | Select-Object FullName, @{n='SizeGB';e={[math]::Round($_.Length/1GB,2)}} | Format-List
+          "ARTIFACT=$archive" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
