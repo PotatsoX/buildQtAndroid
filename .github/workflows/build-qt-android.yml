@@ -7,18 +7,10 @@ on:
         description: "Qt 源码版本（默认 6.12.1）"
         required: false
         default: "6.12.1"
-      openssl_version:
-        description: "OpenSSL 源码版本（只解出 include/openssl 供 runtime SSL 用，默认 3.5.4，对齐 Qt 6.12 Tools and Versions）"
-        required: false
-        default: "3.5.4"
       skip_modules:
         description: "要跳过/关闭的模块与特性（空格或逗号分隔）：模块名走 -skip，以 - 开头的原样传给 configure（如 -no-feature-printsupport）。默认 qtwebengine + 10 个模块 + 3 个 feature（含关闭 tiff，保留 png/jpeg/webp/svg/ico/gif）"
         required: false
         default: "qtwebengine qtgrpc qtserialbus qtscxml qtopcua qtremoteobjects qtactiveqt qtwayland qttasktree qtcoap qtwebchannel -no-feature-printsupport -no-feature-spatialaudio -no-feature-tiff"
-      host_modules:
-        description: "host 阶段编译的模块：auto=只编 target 构建要用的工具模块；all=全量（只减去 skip_modules）；或逗号分隔自定义"
-        required: false
-        default: "auto"
       abi:
         description: "目标 ABI（官方 CI 对照行用 armeabi-v7a）"
         required: false
@@ -33,25 +25,13 @@ on:
         type: boolean
         default: false
       host_linkage:
-        description: "host 的链接方式：shared=共享（默认，工具运行期依赖 Qt6*.dll）；static=静态（去 DLL 依赖，未经 CI 验证）"
+        description: "host 的链接方式：static=静态（默认，工具无 Qt6*.dll 依赖、前缀自包含）；shared=共享（工具运行期依赖 Qt6*.dll）"
         required: false
         type: choice
-        default: shared
+        default: static
         options:
           - shared
           - static
-      host_tools:
-        description: "host 工具裁剪：android=只留 Android 构建链路所需（默认）；full=保留全部，用于排查“是不是裁太狠”"
-        required: false
-        type: choice
-        default: android
-        options:
-          - android
-          - full
-      runner:
-        description: "Runner 标签"
-        required: false
-        default: "windows-2022"
   push:
     tags:
       - "qt-*"
@@ -65,19 +45,22 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ${{ inputs.runner || 'windows-2022' }}
+    runs-on: windows-2022
     timeout-minutes: 360
     env:
       QT_VERSION: ${{ inputs.qt_version || '6.12.1' }}
-      OPENSSL_VERSION: ${{ inputs.openssl_version || '3.5.4' }}
+      # 固定值（不再作为 workflow 输入）：OpenSSL 3.5.4 对齐 Qt 6.12 Tools and Versions
+      OPENSSL_VERSION: '3.5.4'
       QT_SKIP_MODULES: ${{ inputs.skip_modules || 'qtwebengine qtgrpc qtserialbus qtscxml qtopcua qtremoteobjects qtactiveqt qtwayland qttasktree qtcoap qtwebchannel -no-feature-printsupport -no-feature-spatialaudio -no-feature-tiff' }}
-      HOST_MODULES: ${{ inputs.host_modules || 'auto' }}
+      # 只编 target 构建会用到的工具模块（auto 白名单），不做全量 host
+      HOST_MODULES: 'auto'
       # auto 白名单：qtbase/qtsvg/qtdeclarative/qtshadertools/qttools/qtscxml/qtremoteobjects/qtgrpc/
       # qtquick3d/qtquick3dphysics/qtquicktimeline/qtopcua/qtlottie/qtcanvaspainter(6.12 起)
       HOST_AUTO_MODULES: 'qtbase qtsvg qtdeclarative qtshadertools qttools qtscxml qtremoteobjects qtgrpc qtquick3d qtquick3dphysics qtquicktimeline qtopcua qtlottie qtcanvaspainter'
       HOST_ONLY: ${{ inputs.host_only || 'false' }}
-      HOST_LINKAGE: ${{ inputs.host_linkage || 'shared' }}
-      HOST_TOOLS: ${{ inputs.host_tools || 'android' }}
+      HOST_LINKAGE: ${{ inputs.host_linkage || 'static' }}
+      # 只保留 Android 构建链路所需的 host 工具（android 白名单裁剪）
+      HOST_TOOLS: 'android'
       QT_ABI: ${{ inputs.abi || 'arm64-v8a' }}
       WORK_ROOT: D:\qt
       SRC_ROOT: D:\qt\src
@@ -398,9 +381,12 @@ jobs:
             New-Item -ItemType Directory -Force -Path "$env:ANDROID_SDK_ROOT\cmdline-tools" | Out-Null
             Move-Item "$env:TOOLS_DIR\clt\cmdline-tools" "$env:ANDROID_SDK_ROOT\cmdline-tools\latest" -Force
 
-            (1..60 | ForEach-Object { 'y' }) | & $sdkmanager --licenses
-            & $sdkmanager "--sdk_root=$env:ANDROID_SDK_ROOT" "platforms;$env:SDK_PLATFORM" "build-tools;$env:SDK_BUILD_TOOLS" "platform-tools"
-            if ($LASTEXITCODE -ne 0) { throw 'sdkmanager 安装失败' }
+            # sdkmanager 会把全部 SDK 许可协议刷到日志（数百行），这里静默 stdout；
+            # 不用 2>&1 重定向 stderr（ErrorActionPreference=Stop 下可能触发终止异常）
+            (1..60 | ForEach-Object { 'y' }) | & $sdkmanager --licenses | Out-Null
+            & $sdkmanager "--sdk_root=$env:ANDROID_SDK_ROOT" "platforms;$env:SDK_PLATFORM" "build-tools;$env:SDK_BUILD_TOOLS" "platform-tools" | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'sdkmanager 安装失败（见上方 stderr）' }
+            Write-Output 'Android SDK platform/build-tools/platform-tools 安装完成（stdout 已静默）'
           }
 
           if (-not (Test-Path "$env:ANDROID_NDK_ROOT\source.properties")) {
@@ -492,6 +478,15 @@ jobs:
             if ($badImport.Count -gt 0) {
               throw "host 缓存前缀缺少导入目标文件（缓存是旧裁剪结果，需 bump qt-host-build 缓存 key 版本）:`n$($badImport -join "`n")"
             }
+            # 静态 host 的 bin/qt.conf 必须存在（否则 target 阶段 qmake 找不到 spec）；
+            # 旧 static 缓存前缀可能是在写入该逻辑之前生成的，命中时补一次。
+            if ($env:HOST_LINKAGE -eq 'static') {
+              $qconf = Join-Path $env:HOST_PREFIX 'bin\qt.conf'
+              if (-not (Test-Path $qconf)) {
+                Set-Content -Path $qconf -Value '[Paths]', 'Prefix=..' -Encoding ascii
+                Write-Output "缓存命中：补写静态 host 的 $qconf"
+              }
+            }
             Write-Output 'host 前缀命中 build 缓存，跳过 host 构建'
             exit 0
           }
@@ -518,7 +513,8 @@ jobs:
           try {
             $skipArgs = @()
             foreach ($m in $hostSkips) { $skipArgs += @('-skip', $m) }
-            # static 只用于验证自包含/去 DLL 依赖：Qt 文档建议 target 为 shared 时 host 不要 static，且 MinGW 静态不在官方 CI
+            # 默认 static：工具无 Qt6*.dll 依赖、前缀自包含；配合 bin/qt.conf 解决静态不可重定位。
+            # Qt 文档建议 shared target 配 static host，但本仓库 host 只跑构建工具、不进产物，实测可行。
             $linkArgs = if ($env:HOST_LINKAGE -eq 'static') { @('-static', '-static-runtime', '-DFEATURE_relocatable=ON') } else { @() }
             $cfgArgs = @('-prefix', $env:HOST_PREFIX, '-release', '-opensource', '-confirm-license',
               '-nomake', 'examples', '-nomake', 'tests', '-no-openssl', '-platform', 'win32-g++',
@@ -546,6 +542,14 @@ jobs:
               $srcDll = Join-Path $env:TOOLS_DIR "mingw64\bin\$dll"
               if (Test-Path $srcDll) { Copy-Item $srcDll (Join-Path $env:HOST_PREFIX "bin\$dll") -Force }
               else { Write-Warning "MinGW 运行库缺失: $srcDll" }
+            }
+            # 静态 host 不可重定位：qmake 无 qt.conf 时会按编译期绝对路径 D:/qt/host 定位前缀，
+            # 在 target 阶段调 qmake 生成 Makefile 会报 "Could not find qmake spec 'win32-g++'"。
+            # 补 [Paths] Prefix=.. 让 qmake 按相对自身位置解析（boot-qt 静态构建也这么做）。
+            if ($env:HOST_LINKAGE -eq 'static') {
+              $qconf = Join-Path $env:HOST_PREFIX 'bin\qt.conf'
+              Set-Content -Path $qconf -Value '[Paths]', 'Prefix=..' -Encoding ascii
+              Write-Output "已为静态 host 写入 $qconf"
             }
           } finally {
             Pop-Location
