@@ -105,8 +105,19 @@ Android 构建文件：`.github/workflows/build-qt-android.yml`；完整桌面�
 | `build_all` | `false` | `true` 时一次构建全部 4 个组合（矩阵 job，`fail-fast: false`）；推送 `qt-desktop-*` tag 时也自动构建全部并发布 Release |
 | `target` | `qt6-mingw1510_64` | 上表中的组合名；`build_all=true` 时忽略 |
 | `linkage` | `shared-debug-and-release` | `shared-debug-and-release` = Qt5 `-shared -debug-and-release` / Qt6 `-shared -debug-and-release` + **Ninja Multi-Config**（Qt6 自动从 Ninja 切换）；`static-release` = `-static -release`，MSVC 另加 `-static-runtime`，Qt6 另加 `-DFEATURE_relocatable=ON` |
-| `skip_modules` | `qtwebengine` | 空格分隔的模块名，逐个转成 `-skip <模块>`；留空即尝试完整构建。QtWebEngine 在 MinGW 下不受官方支持，且会显著拉长构建时间，故默认跳过 |
+| `skip_modules` | 见下方说明 | 空格分隔：模块名转成 `-skip <模块>`，以 `-` 开头的原样传给 configure（仅 Qt6 生效）。默认值沿用 Android 流程调过的集合，**保留 QtWebEngine**；留空即尝试完整构建 |
 | `make_examples_tests` | `false` | `true` 时去掉 `-nomake examples -nomake tests` |
+
+`skip_modules` 默认值（QtWebEngine 保留）：
+
+```text
+qtgrpc qtserialbus qtscxml qtopcua qtremoteobjects qtactiveqt qtwayland qttasktree qtcoap qtwebchannel
+-no-feature-printsupport -no-feature-spatialaudio -no-feature-tiff
+-no-feature-sql-psql -no-feature-sql-mysql -no-feature-sql-odbc -no-feature-sql-oci
+-no-feature-sql-db2 -no-feature-sql-ibase -no-feature-sql-mimer -no-feature-cups -no-feature-pkg-config
+```
+
+这套值来自 Android 流程的实测调优；`-no-feature-*` 只对 Qt 6 生效（Qt 5 的 feature 名称不同，会忽略），源码中不存在的模块名也会自动忽略。代价是产物不再是"全模块完整桌面版"（缺 gRPC、OPC UA、WebChannel 等），换来的是构建能压进 GitHub 托管 runner 的 6 小时 job 上限。
 
 流程：准备矩阵 → 缓存源码归档（`qt-desktop-src-<版本>-v1`）→ 安装 Python 3.11.9 / CMake 4.3.2 / Ninja 1.10.2 / Strawberry Perl 5.42.2.1 / 对应 MinGW（MSVC 由 `ilammy/msvc-dev-cmd` 用 VS 18.0 初始化 x64 环境）→ 下载解压 Qt 源码（MSVC 直接调用 VS 2026 的 `vcvars64.bat` 初始化 x64 环境；`ilammy/msvc-dev-cmd` 的 vswhere 版本区间 18.0–18.9 匹配不到 18.12，故不使用）→ configure / build / install 到 `D:\qt-desktop\install\<compiler>` → 写 `BUILD-INFO.txt` → 删除 build 目录与解压源码树释放磁盘 → 检查可用空间后用 7z（`-mx=7`）打包并上传 artifact `Qt_<版本>-<链接方式>_<编译器>`。推送 `qt-desktop-*` tag 时会额外发布 Release 附件。
 
@@ -114,6 +125,7 @@ Android 构建文件：`.github/workflows/build-qt-android.yml`；完整桌面�
 
 - **Qt 5.15.19 + MSVC 2026 不是 Qt 官方支持组合**（Qt 5.15 官方支持到 MSVC 2019）；mkspec 没有硬编码的 `MSC_VER` 上限，但如遇编译错误，请改用 `qt5-mingw810_64` 或自行调整。
 - Qt 5.15.19 源码包在 `archive/qt/5.15/5.15.19`，约 1.13 GB；Qt 6.12.1 在 `official_releases/qt/6.12/6.12.1`，约 579 MB。标准 runner 的 D: 盘约 14 GB，完整 debug+release 构建会接近上限；install 完成后工作流会自动删除 build 目录与解压源码树（源码压缩包仍在 `actions/cache` 中，不影响复用），打包前检查可用空间，避免 7z 因 `There is not enough space on the disk` 失败。
+- GitHub 托管 runner 的 job 执行上限硬限 6 小时（到限后 job 以 `cancelled` 结束，`timeout-minutes: 360` 已经到顶），完整构建曾在这个边界超时；默认 `skip_modules` 因此采用上面的调优集合，但**保留 QtWebEngine**。若单组合仍超时，可再临时把 `qtquick3d`、`qtquick3dphysics` 等重模块加进 `skip_modules`。
 - Qt 6 的 `-debug-and-release` 只在多配置生成器下生效：configure 检测到 `ninja` 且需要 debug+release 时会自动使用 `Ninja Multi-Config`，安装时分别对 `Debug`/`Release` 执行 `cmake --install`。
 - MSVC + `shared-debug-and-release` 会在构建过程中运行 Debug 版 `rcc`/`moc`/`uic`：除 vcvars 外，还把 VS 的 `debug_nonredist` 与 Windows SDK 的 `ucrtbased.dll` 目录放进 PATH，并把 `build/qtbase/{bin,lib}/{Debug,Release}` 放进 PATH，避免 `0xc0000135`（DLL not found）。
 - MSVC 目标 configure 必须传 `-platform win32-msvc`（由矩阵 `platform` 提供），Qt 靠它推导编译器为 `cl`；不能用 `-DCMAKE_CXX_COMPILER=cl.exe`（configure.bat 会把它转成编译宏），否则 CMake 会误选 PATH 里的 clang（VS2026 的 vcvars 会加入 clang），触发 STL1009 / WinRT 私有头缺失。MSVC 初始化步骤额外固定 `CC=CXX=cl` 作为双保险。
