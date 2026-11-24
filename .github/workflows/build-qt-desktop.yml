@@ -118,46 +118,6 @@ jobs:
           python-version: "3.11.9"
           architecture: x64
 
-      # 不依赖 ilammy/msvc-dev-cmd：该 action 的 vswhere 版本区间上限是 18.9，
-      # 匹配不到 VS 2026 的 18.12.x；标准路径又只试 18.0\（实际安装目录是 18\）。
-      - name: Set up MSVC 2026 (x64)
-        if: matrix.toolchain == 'msvc'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $vcvars = Get-ChildItem 'C:\Program Files\Microsoft Visual Studio\18\*\VC\Auxiliary\Build\vcvars64.bat' -ErrorAction SilentlyContinue |
-            Sort-Object FullName | Select-Object -First 1
-          if (-not $vcvars) { throw '未找到 VS 2026 的 vcvars64.bat（预期在 C:\Program Files\Microsoft Visual Studio\18\<Edition>\VC\Auxiliary\Build）' }
-          Write-Output "vcvars64: $($vcvars.FullName)"
-          $lines = & cmd.exe /c "`"$($vcvars.FullName)`" x64 && set"
-          if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0; throw 'vcvars64.bat 执行失败' }
-
-          $before = [System.Collections.Generic.Dictionary[string,string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-          Get-ChildItem Env: | ForEach-Object { $before[$_.Name] = $_.Value }
-
-          $newPath = @()
-          foreach ($line in $lines) {
-            if ($line -notmatch '^([^=]+)=(.*)$') { continue }
-            $key, $value = $Matches[1], $Matches[2]
-            if ($key -eq 'Path') {
-              $newPath = @($value -split ';' | Where-Object { $_ -and ($before['Path'] -notlike "*$_*") })
-              continue
-            }
-            if ($key -match '^(GITHUB_|RUNNER_|ACTIONS_|CI$|PWD$|SHLVL$|PSModulePath$|TERM$|TZ$)') { continue }
-            if (-not $before.ContainsKey($key) -or $before[$key] -ne $value) {
-              "$key=$value" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-            }
-          }
-          if ($newPath.Count -gt 0) {
-            # GITHUB_PATH 只对后续 step 生效；当前 step 也要立刻能看到 cl.exe
-            $env:Path = (($newPath + ($env:Path -split ';')) | Where-Object { $_ } | Select-Object -Unique) -join ';'
-            $newPath | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
-          }
-          $global:LASTEXITCODE = 0
-          & cl.exe /? | Select-Object -First 1
-          if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0; throw 'cl.exe 不可用' }
-          $global:LASTEXITCODE = 0
-
       - name: Install build tools (CMake / Ninja / Perl / MinGW)
         shell: pwsh
         run: |
@@ -209,6 +169,48 @@ jobs:
           & ninja --version
           & perl -v | Select-Object -First 2
           if ($env:TOOLCHAIN -eq 'mingw') { & g++ --version | Select-Object -First 1 }
+          $global:LASTEXITCODE = 0
+
+      # 必须放在工具安装之后：安装步骤会把 strawberry\c\bin（内含老版 c++.exe）写进 GITHUB_PATH，
+      # 后写入的 PATH 条目排在前面；若先初始化 MSVC，cl.exe 会被 Strawberry 的 MinGW 盖掉，
+      # Qt6 configure 就会误选 GNU 编译器（报 GetThreadDescription 未定义）。
+      # 不依赖 ilammy/msvc-dev-cmd：该 action 的 vswhere 版本区间上限 18.9 匹配不到 VS 2026 的 18.12.x。
+      - name: Set up MSVC 2026 (x64)
+        if: matrix.toolchain == 'msvc'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vcvars = Get-ChildItem 'C:\Program Files\Microsoft Visual Studio\18\*\VC\Auxiliary\Build\vcvars64.bat' -ErrorAction SilentlyContinue |
+            Sort-Object FullName | Select-Object -First 1
+          if (-not $vcvars) { throw '未找到 VS 2026 的 vcvars64.bat（预期在 C:\Program Files\Microsoft Visual Studio\18\<Edition>\VC\Auxiliary\Build）' }
+          Write-Output "vcvars64: $($vcvars.FullName)"
+          $lines = & cmd.exe /c "`"$($vcvars.FullName)`" x64 && set"
+          if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0; throw 'vcvars64.bat 执行失败' }
+
+          $before = [System.Collections.Generic.Dictionary[string,string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+          Get-ChildItem Env: | ForEach-Object { $before[$_.Name] = $_.Value }
+
+          $newPath = @()
+          foreach ($line in $lines) {
+            if ($line -notmatch '^([^=]+)=(.*)$') { continue }
+            $key, $value = $Matches[1], $Matches[2]
+            if ($key -eq 'Path') {
+              $newPath = @($value -split ';' | Where-Object { $_ -and ($before['Path'] -notlike "*$_*") })
+              continue
+            }
+            if ($key -match '^(GITHUB_|RUNNER_|ACTIONS_|CI$|PWD$|SHLVL$|PSModulePath$|TERM$|TZ$)') { continue }
+            if (-not $before.ContainsKey($key) -or $before[$key] -ne $value) {
+              "$key=$value" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            }
+          }
+          if ($newPath.Count -gt 0) {
+            # GITHUB_PATH 只对后续 step 生效；当前 step 也要立刻能看到 cl.exe
+            $env:Path = (($newPath + ($env:Path -split ';')) | Where-Object { $_ } | Select-Object -Unique) -join ';'
+            $newPath | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          }
+          $global:LASTEXITCODE = 0
+          & cl.exe /? | Select-Object -First 1
+          if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0; throw 'cl.exe 不可用' }
           $global:LASTEXITCODE = 0
 
       - name: Fetch and extract Qt sources
@@ -298,7 +300,9 @@ jobs:
           }
           if ($env:MAKE_EXAMPLES_TESTS -ne 'true') { $cfg += @('-nomake', 'examples', '-nomake', 'tests') }
           foreach ($m in $skip) { $cfg += @('-skip', $m) }
-          if ($env:TOOLCHAIN -eq 'msvc') { $cfg += '-DCMAKE_CXX_FLAGS=/utf-8' }
+          if ($env:TOOLCHAIN -eq 'msvc') {
+            $cfg += @('-DCMAKE_C_COMPILER=cl.exe', '-DCMAKE_CXX_COMPILER=cl.exe', '-DCMAKE_CXX_FLAGS=/utf-8')
+          }
 
           New-Item -ItemType Directory -Force -Path $env:BUILD_DIR | Out-Null
           Push-Location $env:BUILD_DIR
