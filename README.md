@@ -39,7 +39,7 @@
 
 ## 工作流
 
-文件：`.github/workflows/build-qt-android.yml`
+Android 构建文件：`.github/workflows/build-qt-android.yml`；完整桌面版构建文件：`.github/workflows/build-qt-desktop.yml`（见「桌面版构建」）。
 
 触发方式：
 
@@ -78,6 +78,38 @@
 
 磁盘布局：源码、构建目录与安装前缀放在 **D:**（runner 临时盘）；SDK/NDK/工具装在 **C:**，避免挤占 14 GB 的 D: 盘。
 
+## 桌面版构建
+
+文件：`.github/workflows/build-qt-desktop.yml`。从官方源码构建 **完整 Windows 桌面版 Qt**（host = target，非交叉编译），参考 [PotatsoX/buildQt](https://github.com/PotatsoX/buildQt) 的 Qt 5 构建流程，工具版本依据 [Qt 6.12 Tools and Versions](https://wiki.qt.io/Qt_6.12_Tools_and_Versions) 的 Windows 11 24H2 x86_64 列与 [Qt 6.12 Release](https://wiki.qt.io/Qt_6.12_Release)。
+
+支持的 4 个组合（`target` 输入）：
+
+| target | Qt 版本 | 编译器 | runner | 源码包 | 构建系统 |
+|---|---|---|---|---|---|
+| `qt5-mingw810_64` | 5.15.19 | MinGW-w64 8.1.0 (posix-seh, rt_v6) | `windows-2022` | `qt-everywhere-opensource-src-5.15.19.zip` | qmake + mingw32-make |
+| `qt5-msvc2026_64` | 5.15.19 | MSVC 2026 (VS 18.x, x64) | `windows-2025-vs2026` | 同上 | qmake + nmake |
+| `qt6-mingw1510_64` | 6.12.1 | MinGW-w64 15.1.0 (posix-seh, msvcrt, rt_v12) | `windows-2022` | `qt-everywhere-src-6.12.1.zip` | CMake + Ninja |
+| `qt6-msvc2026_64` | 6.12.1 | MSVC 2026 (VS 18.x, x64) | `windows-2025-vs2026` | 同上 | CMake + Ninja |
+
+可调参数：
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `build_all` | `false` | `true` 时一次构建全部 4 个组合（矩阵 job，`fail-fast: false`）；推送 `qt-desktop-*` tag 时也自动构建全部并发布 Release |
+| `target` | `qt6-mingw1510_64` | 上表中的组合名；`build_all=true` 时忽略 |
+| `linkage` | `shared-debug-and-release` | `shared-debug-and-release` = Qt5 `-shared -debug-and-release` / Qt6 `-shared -debug-and-release` + **Ninja Multi-Config**（Qt6 自动从 Ninja 切换）；`static-release` = `-static -release`，MSVC 另加 `-static-runtime`，Qt6 另加 `-DFEATURE_relocatable=ON` |
+| `skip_modules` | `qtwebengine` | 空格分隔的模块名，逐个转成 `-skip <模块>`；留空即尝试完整构建。QtWebEngine 在 MinGW 下不受官方支持，且会显著拉长构建时间，故默认跳过 |
+| `make_examples_tests` | `false` | `true` 时去掉 `-nomake examples -nomake tests` |
+
+流程：准备矩阵 → 缓存源码归档（`qt-desktop-src-<版本>-v1`）→ 安装 Python 3.11.9 / CMake 4.3.2 / Ninja 1.10.2 / Strawberry Perl 5.42.2.1 / 对应 MinGW（MSVC 由 `ilammy/msvc-dev-cmd` 用 VS 18.0 初始化 x64 环境）→ 下载解压 Qt 源码 → configure / build / install 到 `D:\qt-desktop\install\<compiler>` → 写 `BUILD-INFO.txt` → 7z 打包并上传 artifact `Qt_<版本>-<链接方式>_<编译器>`。推送 `qt-desktop-*` tag 时会额外发布 Release 附件。
+
+注意事项：
+
+- **Qt 5.15.19 + MSVC 2026 不是 Qt 官方支持组合**（Qt 5.15 官方支持到 MSVC 2019）；mkspec 没有硬编码的 `MSC_VER` 上限，但如遇编译错误，请改用 `qt5-mingw810_64` 或自行调整。
+- Qt 5.15.19 源码包在 `archive/qt/5.15/5.15.19`，约 1.13 GB；Qt 6.12.1 在 `official_releases/qt/6.12/6.12.1`，约 579 MB。标准 runner 的 D: 盘约 14 GB，完整 debug+release 构建可能接近上限；源码归档有缓存，构建目录安装后不清理也可手动删除。
+- Qt 6 的 `-debug-and-release` 只在多配置生成器下生效：configure 检测到 `ninja` 且需要 debug+release 时会自动使用 `Ninja Multi-Config`，安装时分别对 `Debug`/`Release` 执行 `cmake --install`。
+- 所有可选 `curl` 下载后都会清零 `$LASTEXITCODE`，避免 404（例如缺失的 md5sums）让 PowerShell 步骤误判失败。
+
 ## 工作流使用的 Action 版本
 
 全部已支持 Node 24（各 tag 的 `action.yml` 为 `runs.using: node24`），不再触发 Node 20 弃用告警。工作流按主版本 tag 引用（`@v6`/`@v7`），下表版本为 2026-11-04 的实际解析结果：
@@ -90,6 +122,7 @@
 | `actions/setup-python` | v6.3.0 | [v6.3.0 action.yml](https://github.com/actions/setup-python/blob/v6.3.0/action.yml) | `python-version`/`architecture` 未变 |
 | `actions/upload-artifact` | v7.0.2 | [v7.0.2 action.yml](https://github.com/actions/upload-artifact/blob/v7.0.2/action.yml) | `name`/`path`/`compression-level`/`retention-days` 未变 |
 | `softprops/action-gh-release` | v3.0.3 | [v3.0.3 action.yml](https://github.com/softprops/action-gh-release/blob/v3.0.3/action.yml) | `files` 与 v2 兼容 |
+| `ilammy/msvc-dev-cmd` | v1.13.0 | [v1.13.0 action.yml](https://github.com/ilammy/msvc-dev-cmd/blob/v1.13.0/action.yml) | 桌面 workflow 用 `arch: x64`、`vsversion: 18.0`（VS 2026；该 action 的年份表只到 2022，但版本号可直接传入并由 vswhere 匹配 18.x） |
 
 `actions/download-artifact` 未使用（若将来引入，v5 的单 ID 下载路径已从 `path/<name>/` 改为 `path/`，v8 起哈希不匹配默认报错）。
 

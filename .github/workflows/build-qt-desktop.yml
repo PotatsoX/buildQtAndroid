@@ -1,0 +1,339 @@
+name: build-qt-desktop
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_all:
+        description: "构建全部 4 个组合（忽略下面的 target）"
+        required: false
+        type: boolean
+        default: false
+      target:
+        description: "构建目标（Qt 版本 + 编译器）"
+        required: false
+        type: choice
+        default: "qt6-mingw1510_64"
+        options:
+          - qt5-msvc2026_64
+          - qt5-mingw810_64
+          - qt6-mingw1510_64
+          - qt6-msvc2026_64
+      linkage:
+        description: "链接方式"
+        required: false
+        type: choice
+        default: "shared-debug-and-release"
+        options:
+          - shared-debug-and-release
+          - static-release
+      skip_modules:
+        description: "要跳过的模块（空格分隔）。默认 qtwebengine；留空 = 尝试完整构建（QtWebEngine 在 MinGW 下不受支持）"
+        required: false
+        default: "qtwebengine"
+      make_examples_tests:
+        description: "是否编译 examples 与 tests（默认不编，产物更小）"
+        required: false
+        type: boolean
+        default: false
+  push:
+    tags:
+      - "qt-desktop-*"
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      linkage: ${{ steps.plan.outputs.linkage }}
+      skip_modules: ${{ steps.plan.outputs.skip_modules }}
+      make_examples_tests: ${{ steps.plan.outputs.make_examples_tests }}
+    steps:
+      - name: Compute build matrix
+        id: plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          TARGETS='[
+            {"target":"qt5-msvc2026_64","qt_version":"5.15.19","qt_major":"5.15","compiler":"msvc2026_64","toolchain":"msvc","runner":"windows-2025-vs2026","platform":"win32-msvc"},
+            {"target":"qt5-mingw810_64","qt_version":"5.15.19","qt_major":"5.15","compiler":"mingw810_64","toolchain":"mingw","runner":"windows-2022","platform":"win32-g++"},
+            {"target":"qt6-mingw1510_64","qt_version":"6.12.1","qt_major":"6.12","compiler":"mingw1510_64","toolchain":"mingw","runner":"windows-2022","platform":"win32-g++"},
+            {"target":"qt6-msvc2026_64","qt_version":"6.12.1","qt_major":"6.12","compiler":"msvc2026_64","toolchain":"msvc","runner":"windows-2025-vs2026","platform":"win32-msvc"}
+          ]'
+          if [ "${{ github.event_name }}" = "push" ] || [ "${{ inputs.build_all }}" = "true" ]; then
+            SELECTED="$TARGETS"
+          else
+            SELECTED=$(echo "$TARGETS" | jq -c --arg t "${{ inputs.target || 'qt6-mingw1510_64' }}" 'map(select(.target == $t))')
+          fi
+          if [ "$(echo "$SELECTED" | jq 'length')" -eq 0 ]; then
+            echo "Unknown target" >&2
+            exit 1
+          fi
+          echo "matrix=$(echo "$SELECTED" | jq -c .)" >> "$GITHUB_OUTPUT"
+          echo "linkage=${{ inputs.linkage || 'shared-debug-and-release' }}" >> "$GITHUB_OUTPUT"
+          echo "skip_modules=${{ inputs.skip_modules || 'qtwebengine' }}" >> "$GITHUB_OUTPUT"
+          echo "make_examples_tests=${{ inputs.make_examples_tests || false }}" >> "$GITHUB_OUTPUT"
+          echo "Build plan: $(echo "$SELECTED" | jq -c .)"
+
+  build:
+    needs: prepare
+    name: ${{ matrix.target }} / ${{ needs.prepare.outputs.linkage }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    env:
+      QT_VERSION: ${{ matrix.qt_version }}
+      QT_MAJOR_MINOR: ${{ matrix.qt_major }}
+      COMPILER: ${{ matrix.compiler }}
+      TOOLCHAIN: ${{ matrix.toolchain }}
+      PLATFORM_SPEC: ${{ matrix.platform }}
+      LINKAGE: ${{ needs.prepare.outputs.linkage }}
+      SKIP_MODULES: ${{ needs.prepare.outputs.skip_modules }}
+      MAKE_EXAMPLES_TESTS: ${{ needs.prepare.outputs.make_examples_tests }}
+      WORK_ROOT: D:\qt-desktop
+      ARCHIVE_DIR: D:\qt-desktop\archives
+      SRC_ROOT: D:\qt-desktop\src
+      TOOLS_DIR: D:\qt-desktop\tools
+      BUILD_DIR: D:\qt-desktop\build
+      PREFIX: D:\qt-desktop\install
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Cache Qt source archive
+        uses: actions/cache@v6
+        with:
+          path: D:\qt-desktop\archives
+          key: qt-desktop-src-${{ matrix.qt_version }}-v1
+
+      - name: Setup Python 3.11.9
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11.9"
+          architecture: x64
+
+      - name: Set up MSVC 2026 (x64)
+        if: matrix.toolchain == 'msvc'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+          vsversion: "18.0"
+
+      - name: Install build tools (CMake / Ninja / Perl / MinGW)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Get-File([string]$Url, [string]$Out) {
+            curl.exe -L --fail --retry 5 --retry-delay 10 --max-time 1800 -o $Out $Url
+            if ($LASTEXITCODE -ne 0) { throw "下载失败: $Url" }
+            $global:LASTEXITCODE = 0
+          }
+          New-Item -ItemType Directory -Force -Path $env:TOOLS_DIR, $env:ARCHIVE_DIR, $env:SRC_ROOT | Out-Null
+
+          # CMake 4.3.2（Qt 6.12 官方版本页）；Qt5 不用 CMake，但统一安装便于校验
+          Get-File 'https://github.com/Kitware/CMake/releases/download/v4.3.2/cmake-4.3.2-windows-x86_64.zip' "$env:TOOLS_DIR\cmake.zip"
+          Expand-Archive "$env:TOOLS_DIR\cmake.zip" "$env:TOOLS_DIR\cmake-tmp" -Force
+          Move-Item "$env:TOOLS_DIR\cmake-tmp\cmake-4.3.2-windows-x86_64" "$env:TOOLS_DIR\cmake" -Force
+
+          # Ninja 1.10.2：Qt6 检测到 ninja 且需要 debug-and-release 时会自动切到 Ninja Multi-Config
+          Get-File 'https://github.com/ninja-build/ninja/releases/download/v1.10.2/ninja-win.zip' "$env:TOOLS_DIR\ninja.zip"
+          Expand-Archive "$env:TOOLS_DIR\ninja.zip" "$env:TOOLS_DIR\ninja" -Force
+
+          # Strawberry Perl（Qt 构建脚本依赖）
+          Get-File 'https://github.com/StrawberryPerl/Perl-Dist-Strawberry/releases/download/SP_54221_64bit/strawberry-perl-5.42.2.1-64bit-portable.zip' "$env:TOOLS_DIR\perl.zip"
+          Expand-Archive "$env:TOOLS_DIR\perl.zip" "$env:TOOLS_DIR\strawberry" -Force
+
+          $path = @(
+            "$env:TOOLS_DIR\cmake\bin",
+            "$env:TOOLS_DIR\ninja",
+            "$env:TOOLS_DIR\strawberry\c\bin",
+            "$env:TOOLS_DIR\strawberry\perl\bin"
+          )
+
+          if ($env:TOOLCHAIN -eq 'mingw') {
+            if ($env:COMPILER -eq 'mingw810_64') {
+              $mingwUrl = 'https://download.qt.io/online/qtsdkrepository/windows_x86/desktop/tools_mingw81/qt.tools.win64_mingw810/8.1.0-1-202411201005x86_64-8.1.0-gdb-11.2.0-release-posix-seh-rt_v6-rev0.7z'
+            } else {
+              $mingwUrl = 'https://github.com/niXman/mingw-builds-binaries/releases/download/15.1.0-rt_v12-rev0/x86_64-15.1.0-release-posix-seh-msvcrt-rt_v12-rev0.7z'
+            }
+            Get-File $mingwUrl "$env:TOOLS_DIR\mingw.7z"
+            # Qt 在线仓库的 8.1.0 包把 bin/ 直接放在压缩包根；niXman 15.1.0 包带 mingw64/ 顶层目录
+            $mingwOut = if ($env:COMPILER -eq 'mingw810_64') { "$env:TOOLS_DIR\mingw64" } else { $env:TOOLS_DIR }
+            & 7z x -y "-o$mingwOut" "$env:TOOLS_DIR\mingw.7z" | Out-Null
+            if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0; throw "MinGW 解压失败" }
+            $path += "$env:TOOLS_DIR\mingw64\bin"
+          }
+          $path | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          $global:LASTEXITCODE = 0
+
+          & cmake --version
+          & ninja --version
+          & perl -v | Select-Object -First 2
+          if ($env:TOOLCHAIN -eq 'mingw') { & g++ --version | Select-Object -First 1 }
+          $global:LASTEXITCODE = 0
+
+      - name: Fetch and extract Qt sources
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Get-File([string]$Url, [string]$Out) {
+            curl.exe -L --fail --retry 5 --retry-delay 10 --max-time 2400 -o $Out $Url
+            if ($LASTEXITCODE -ne 0) { throw "下载失败: $Url" }
+            $global:LASTEXITCODE = 0
+          }
+          if ($env:QT_MAJOR_MINOR -eq '5.15') {
+            $name = "qt-everywhere-opensource-src-$env:QT_VERSION.zip"
+            $url = "https://download.qt.io/archive/qt/5.15/$env:QT_VERSION/single/$name"
+          } else {
+            $name = "qt-everywhere-src-$env:QT_VERSION.zip"
+            $url = "https://download.qt.io/official_releases/qt/6.12/$env:QT_VERSION/single/$name"
+          }
+          $archive = Join-Path $env:ARCHIVE_DIR $name
+          if (-not (Test-Path $archive)) { Get-File $url $archive }
+          $root = Join-Path $env:SRC_ROOT "qt-everywhere-src-$env:QT_VERSION"
+          if (-not (Test-Path (Join-Path $root 'configure.bat'))) {
+            Write-Output "解压源码: $archive -> $env:SRC_ROOT"
+            & 7z x -y "-o$env:SRC_ROOT" $archive | Out-Null
+            if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0; throw "源码解压失败" }
+          }
+          if (-not (Test-Path (Join-Path $root 'configure.bat'))) { throw "源码目录异常: $root" }
+          $global:LASTEXITCODE = 0
+          Write-Output "源码就绪: $root"
+          "QT_SRC=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Get-PSDrive D | Select-Object Name, @{n='FreeGB';e={[math]::Round($_.Free/1GB,1)}} | Format-Table
+
+      - name: Configure / build / install Qt (Qt 5 qmake)
+        if: matrix.qt_major == '5.15'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $prefix = Join-Path $env:PREFIX $env:COMPILER
+          New-Item -ItemType Directory -Force -Path $prefix | Out-Null
+          $skip = @($env:SKIP_MODULES -split '[\s,]+' | Where-Object { $_ })
+          $cfg = @('-opensource', '-confirm-license', "-prefix", $prefix, '-platform', $env:PLATFORM_SPEC)
+          if ($env:LINKAGE -eq 'static-release') {
+            $cfg += @('-static', '-release')
+            if ($env:TOOLCHAIN -eq 'msvc') { $cfg += '-static-runtime' }
+          } else {
+            $cfg += @('-shared', '-debug-and-release')
+          }
+          if ($env:MAKE_EXAMPLES_TESTS -ne 'true') { $cfg += @('-nomake', 'examples', '-nomake', 'tests') }
+          foreach ($m in $skip) { $cfg += @('-skip', $m) }
+          $cfg += @('-qt-libpng', '-qt-libjpeg', '-qt-zlib', '-qt-pcre', '-qt-freetype', '-schannel', '-opengl', 'desktop')
+
+          New-Item -ItemType Directory -Force -Path $env:BUILD_DIR | Out-Null
+          Push-Location $env:BUILD_DIR
+          try {
+            $cfgLine = ($cfg | ForEach-Object { '"' + $_ + '"' }) -join ' '
+            "configure: $cfgLine" | Out-File -FilePath "$env:WORK_ROOT\configure-command.txt" -Encoding utf8
+            Write-Output "configure: $cfgLine"
+            & (Join-Path $env:QT_SRC 'configure.bat') @cfg
+            if ($LASTEXITCODE -ne 0) { throw "Qt5 configure 失败" }
+            $make = if ($env:TOOLCHAIN -eq 'msvc') { 'nmake' } else { 'mingw32-make' }
+            $jobs = "$env:NUMBER_OF_PROCESSORS"
+            & $make "-j$jobs"
+            if ($LASTEXITCODE -ne 0) { throw "Qt5 编译失败" }
+            & $make install
+            if ($LASTEXITCODE -ne 0) { throw "Qt5 安装失败" }
+          } finally {
+            Pop-Location
+            $global:LASTEXITCODE = 0
+          }
+          "QT_PREFIX=$prefix" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Configure / build / install Qt (Qt 6 CMake)
+        if: matrix.qt_major == '6.12'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $prefix = Join-Path $env:PREFIX $env:COMPILER
+          New-Item -ItemType Directory -Force -Path $prefix | Out-Null
+          $skip = @($env:SKIP_MODULES -split '[\s,]+' | Where-Object { $_ })
+          $cfg = @('-opensource', '-confirm-license', '-prefix', $prefix)
+          if ($env:LINKAGE -eq 'static-release') {
+            $cfg += @('-static', '-release')
+            if ($env:TOOLCHAIN -eq 'msvc') { $cfg += '-static-runtime' }
+            $cfg += '-DFEATURE_relocatable=ON'
+          } else {
+            $cfg += @('-shared', '-debug-and-release')
+          }
+          if ($env:MAKE_EXAMPLES_TESTS -ne 'true') { $cfg += @('-nomake', 'examples', '-nomake', 'tests') }
+          foreach ($m in $skip) { $cfg += @('-skip', $m) }
+          if ($env:TOOLCHAIN -eq 'msvc') { $cfg += '-DCMAKE_CXX_FLAGS=/utf-8' }
+
+          New-Item -ItemType Directory -Force -Path $env:BUILD_DIR | Out-Null
+          Push-Location $env:BUILD_DIR
+          try {
+            $cfgLine = ($cfg | ForEach-Object { '"' + $_ + '"' }) -join ' '
+            "configure: $cfgLine" | Out-File -FilePath "$env:WORK_ROOT\configure-command.txt" -Encoding utf8
+            Write-Output "configure: $cfgLine"
+            & (Join-Path $env:QT_SRC 'configure.bat') @cfg
+            if ($LASTEXITCODE -ne 0) { throw "Qt6 configure 失败" }
+            if ($env:LINKAGE -eq 'shared-debug-and-release') {
+              foreach ($config in @('Debug', 'Release')) {
+                & cmake --build . --config $config --parallel
+                if ($LASTEXITCODE -ne 0) { throw "Qt6 编译失败 ($config)" }
+                & cmake --install . --config $config
+                if ($LASTEXITCODE -ne 0) { throw "Qt6 安装失败 ($config)" }
+              }
+            } else {
+              & cmake --build . --parallel
+              if ($LASTEXITCODE -ne 0) { throw "Qt6 编译失败" }
+              & cmake --install .
+              if ($LASTEXITCODE -ne 0) { throw "Qt6 安装失败" }
+            }
+          } finally {
+            Pop-Location
+            $global:LASTEXITCODE = 0
+          }
+          "QT_PREFIX=$prefix" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Write BUILD-INFO.txt
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $lines = @(
+            "Qt version: $env:QT_VERSION",
+            "Target: $env:COMPILER",
+            "Linkage: $env:LINKAGE",
+            "Runner: ${{ matrix.runner }}",
+            "Skipped modules: $env:SKIP_MODULES",
+            "Configure: $(Get-Content "$env:WORK_ROOT\configure-command.txt" -Raw)"
+          )
+          if ($env:TOOLCHAIN -eq 'msvc') {
+            $lines += "Compiler: $(& cl 2>&1 | Select-Object -First 1)"
+          } else {
+            $lines += "Compiler: $(& g++ --version | Select-Object -First 1)"
+          }
+          $lines | Out-File -FilePath (Join-Path $env:QT_PREFIX 'BUILD-INFO.txt') -Encoding utf8 -Append
+          $global:LASTEXITCODE = 0
+
+      - name: Package artifact
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $name = "Qt_${env:QT_VERSION}-${env:LINKAGE}_${env:COMPILER}.7z"
+          & 7z a -t7z -mx=9 $name "$env:QT_PREFIX"
+          if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0; throw "打包失败" }
+          $global:LASTEXITCODE = 0
+          "ARTIFACT=$name" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: Qt_${{ matrix.qt_version }}-${{ needs.prepare.outputs.linkage }}_${{ matrix.compiler }}
+          path: ${{ env.ARTIFACT }}
+          if-no-files-found: error
+
+      - name: Publish release (tag only)
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ARTIFACT }}
+          generate_release_notes: true
