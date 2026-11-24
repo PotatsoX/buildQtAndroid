@@ -37,6 +37,9 @@ if (-not (Test-Path $md5File)) {
         curl.exe -L --fail --max-time 120 -o $md5File "$base/single/md5sums.txt"
         if ($LASTEXITCODE -eq 0) { break }
     }
+    # md5sums.txt 是可选文件（6.12.1 目录尚未提供）：curl 404 会把 LASTEXITCODE 留在 22，
+    # 导致 pwsh 在整个脚本“源码就绪”后仍以非零码退出，整步被误判失败。此处显式清零。
+    $global:LASTEXITCODE = 0
 }
 if (Test-Path $md5File) {
     $line = Select-String -Path $md5File -SimpleMatch -Pattern $archiveName | Select-Object -First 1
