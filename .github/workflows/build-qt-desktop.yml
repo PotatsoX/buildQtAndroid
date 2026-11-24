@@ -226,6 +226,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0; throw 'cl.exe 不可用' }
           $global:LASTEXITCODE = 0
 
+          # 双保险：显式固定 CMake 的 C/CXX 编译器为 cl，避免 VS2026 的 vcvars 把
+          # VC\Tools\Llvm\x64\bin（clang）加进 PATH 后被 CMake 自动探测选中。
+          $env:CC = 'cl'
+          $env:CXX = 'cl'
+          "CC=cl" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "CXX=cl" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Fetch and extract Qt sources
         shell: pwsh
         run: |
@@ -311,7 +318,11 @@ jobs:
           )
           $env:Path = (($qtBuildBins + ($env:Path -split ';')) | Where-Object { $_ } | Select-Object -Unique) -join ';'
           $skip = @($env:SKIP_MODULES -split '[\s,]+' | Where-Object { $_ })
-          $cfg = @('-opensource', '-confirm-license', '-prefix', $prefix)
+          # Qt6 configure 依赖 -platform <mkspec> 来推导编译器（win32-msvc -> cl，win32-g++ -> g++）。
+          # 不能用 -DCMAKE_CXX_COMPILER=cl.exe：configure.bat 会把 -D 收进 QT_EXTRA_DEFINES（编译宏），
+          # 于是 CMake 自行探测，在 VS2026 环境里会选中 vcvars 加入 PATH 的 clang（win32-clang-msvc），
+          # 进而触发 STL1009 与 WinRT 私有头缺失。
+          $cfg = @('-opensource', '-confirm-license', '-prefix', $prefix, '-platform', $env:PLATFORM_SPEC)
           if ($env:LINKAGE -eq 'static-release') {
             $cfg += @('-static', '-release')
             if ($env:TOOLCHAIN -eq 'msvc') { $cfg += '-static-runtime' }
@@ -321,9 +332,6 @@ jobs:
           }
           if ($env:MAKE_EXAMPLES_TESTS -ne 'true') { $cfg += @('-nomake', 'examples', '-nomake', 'tests') }
           foreach ($m in $skip) { $cfg += @('-skip', $m) }
-          if ($env:TOOLCHAIN -eq 'msvc') {
-            $cfg += @('-DCMAKE_C_COMPILER=cl.exe', '-DCMAKE_CXX_COMPILER=cl.exe', '-DCMAKE_CXX_FLAGS=/utf-8')
-          }
 
           New-Item -ItemType Directory -Force -Path $env:BUILD_DIR | Out-Null
           Push-Location $env:BUILD_DIR
