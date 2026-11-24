@@ -442,7 +442,7 @@ jobs:
         with:
           path: D:\qt\host
           # 缓存里存的是已裁剪的前缀：裁剪规则变更后旧缓存会缺文件，必须 bump 末尾版本号
-          key: qt-host-build-${{ env.QT_VERSION }}-${{ env.SKIP_KEY }}-${{ env.HOST_LINKAGE }}-hostset${{ env.HOST_SET_KEY }}-mingw${{ env.MINGW_VERSION }}-cmake${{ env.CMAKE_VERSION }}-v2
+          key: qt-host-build-${{ env.QT_VERSION }}-${{ env.SKIP_KEY }}-${{ env.HOST_LINKAGE }}-hostset${{ env.HOST_SET_KEY }}-mingw${{ env.MINGW_VERSION }}-cmake${{ env.CMAKE_VERSION }}-v3
 
       - name: Build host Qt tools (source)
         shell: pwsh
@@ -505,6 +505,9 @@ jobs:
           & $env:SEVEN_ZIP x -y "-o$env:TOOLS_DIR" "$env:TOOLS_DIR\mingw.7z"
           if ($LASTEXITCODE -ne 0) { throw 'MinGW 解压失败' }
           $env:PATH = "$env:TOOLS_DIR\mingw64\bin;$env:PATH"
+          # host 工具是 MinGW 动态链接：后续 target 步骤仍要能找到 MinGW 运行库，
+          # 否则 installed syncqt.exe 会以 0xc0000135 退出且没有任何错误输出。
+          "$env:TOOLS_DIR\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
           & gcc --version
 
           New-Item -ItemType Directory -Force -Path $env:HOST_PREFIX | Out-Null
@@ -536,6 +539,14 @@ jobs:
             & cmake --install . --strip
             if ($LASTEXITCODE -ne 0) { throw "host install 失败: $LASTEXITCODE" }
             $t.Stop(); "T_HOST_INSTALL={0:N1}" -f $t.Elapsed.TotalSeconds | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            # 让 host 前缀自带 MinGW 运行库：target 阶段调用 installed syncqt.exe/moc 时
+            # 不再依赖 C:\tools\mingw64\bin 是否被写进 PATH；缓存命中后的前缀也自包含。
+            $runtimeDlls = @('libgcc_s_seh-1.dll', 'libstdc++-6.dll', 'libwinpthread-1.dll')
+            foreach ($dll in $runtimeDlls) {
+              $srcDll = Join-Path $env:TOOLS_DIR "mingw64\bin\$dll"
+              if (Test-Path $srcDll) { Copy-Item $srcDll (Join-Path $env:HOST_PREFIX "bin\$dll") -Force }
+              else { Write-Warning "MinGW 运行库缺失: $srcDll" }
+            }
           } finally {
             Pop-Location
           }
@@ -619,6 +630,8 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          # target 构建会调用 host 前缀里的 syncqt.exe/moc/rcc（MinGW 动态链接）
+          $env:Path = "$env:TOOLS_DIR\mingw64\bin;$env:HOST_PREFIX\bin;$env:Path"
           $src = Join-Path $env:SRC_ROOT "qt-everywhere-src-$env:QT_VERSION"
           Write-Output '--- 磁盘(target 前) ---'
           Get-PSDrive D, C | Select-Object Name, @{n='FreeGB'; e={[math]::Round($_.Free / 1GB, 1)}} | Format-Table

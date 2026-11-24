@@ -298,7 +298,7 @@ host 侧参数（`-platform win32-g++`、`-qt-zlib`、`-schannel` 等）只用�
 | 源码归档（6.12.1 约 579 MB） | `qt-src-zip-<qt_version>-v1` |
 | Android SDK/NDK（约 3 GB） | `android-<ndk>-<platform>-<build-tools>-<cmdline>-v1` |
 | Gradle home（推断 1–2 GB） | `gradle-qt<qt_version>-bt<build-tools>-v1` |
-| host 前缀（未裁剪约 1.4 GB） | `qt-host-build-<qt_version>-<skip_key>-<linkage>-hostset<host_set>-mingw<ver>-cmake<ver>-v2`；`auto` 时 `<host_set>` 为白名单内容的 8 位散列 |
+| host 前缀（未裁剪约 1.4 GB） | `qt-host-build-<qt_version>-<skip_key>-<linkage>-hostset<host_set>-mingw<ver>-cmake<ver>-v3`；`auto` 时 `<host_set>` 为白名单内容的 8 位散列。v3 起 host 前缀自带 MinGW 运行库 DLL（`libgcc_s_seh-1.dll`/`libstdc++-6.dll`/`libwinpthread-1.dll`），缓存命中后 installed `syncqt.exe` 不再因缺 DLL 静默退出 |
 
 `host_set` 是 `host_modules` 的归一化串（非字母数字 → `-`、小写）；`auto` 时取白名单内容的 SHA-256 前 8 位（`auto-xxxxxxxx`），白名单一变缓存即失效。`.cache-ok` 标记内容为 `build:<linkage>:<host_set>`，恢复缓存后还会再校验一次，避免把旧的全量前缀当最小集用。`<linkage>` 为 `shared`/`static`，两种链接方式的前缀不可互换。
 
