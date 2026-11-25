@@ -119,7 +119,7 @@ qtgrpc qtserialbus qtscxml qtopcua qtremoteobjects qtactiveqt qtwayland qttasktr
 
 这套值来自 Android 流程的实测调优；`-no-feature-*` 只对 Qt 6 生效（Qt 5 的 feature 名称不同，会忽略），源码中不存在的模块名也会自动忽略。代价是产物不再是"全模块完整桌面版"（缺 gRPC、OPC UA、WebChannel 等），换来的是构建能压进 GitHub 托管 runner 的 6 小时 job 上限。
 
-流程：准备矩阵 → 缓存源码归档（`qt-desktop-src-<版本>-v1`）→ 安装 Python 3.11.9 / CMake 4.3.2 / Ninja 1.10.2 / Strawberry Perl 5.42.2.1 / 对应 MinGW（MSVC 由 `ilammy/msvc-dev-cmd` 用 VS 18.0 初始化 x64 环境）→ 下载解压 Qt 源码（MSVC 直接调用 VS 2026 的 `vcvars64.bat` 初始化 x64 环境；`ilammy/msvc-dev-cmd` 的 vswhere 版本区间 18.0–18.9 匹配不到 18.12，故不使用）→ configure / build / install 到 `D:\qt-desktop\install\<compiler>` → 写 `BUILD-INFO.txt` → 删除 build 目录与解压源码树释放磁盘 → 检查可用空间后用 7z（`-mx=7`）打包并上传 artifact `Qt_<版本>-<链接方式>_<编译器>`。推送 `qt-desktop-*` tag 时会额外发布 Release 附件。
+流程：准备矩阵 → 缓存源码归档（`qt-desktop-src-<版本>-v1`）→ 安装 Python 3.11.9 / CMake 4.3.2 / Ninja 1.10.2 / Strawberry Perl 5.42.2.1 / 对应 MinGW（MSVC 由 `ilammy/msvc-dev-cmd` 用 VS 18.0 初始化 x64 环境）→ 下载解压 Qt 源码（MSVC 直接调用 VS 2026 的 `vcvars64.bat` 初始化 x64 环境；`ilammy/msvc-dev-cmd` 的 vswhere 版本区间 18.0–18.9 匹配不到 18.12，故不使用）→ configure / build / install 到 `D:\qt-desktop\install\<compiler>` → 写 `BUILD-INFO.txt` → 删除 build 目录与解压源码树释放磁盘 → 检查可用空间后用 7z（`-mx=5`）打包并上传 artifact `Qt_<版本>-<链接方式>_<编译器>`。推送 `qt-desktop-*` tag 时会额外发布 Release 附件。
 
 注意事项：
 
@@ -129,6 +129,7 @@ qtgrpc qtserialbus qtscxml qtopcua qtremoteobjects qtactiveqt qtwayland qttasktr
 - Qt 6 的 `-debug-and-release` 只在多配置生成器下生效：configure 检测到 `ninja` 且需要 debug+release 时会自动使用 `Ninja Multi-Config`，安装时分别对 `Debug`/`Release` 执行 `cmake --install`。
 - MSVC + `shared-debug-and-release` 会在构建过程中运行 Debug 版 `rcc`/`moc`/`uic`：除 vcvars 外，还把 VS 的 `debug_nonredist` 与 Windows SDK 的 `ucrtbased.dll` 目录放进 PATH，并把 `build/qtbase/{bin,lib}/{Debug,Release}` 放进 PATH，避免 `0xc0000135`（DLL not found）。
 - MSVC 目标 configure 必须传 `-platform win32-msvc`（由矩阵 `platform` 提供），Qt 靠它推导编译器为 `cl`；不能用 `-DCMAKE_CXX_COMPILER=cl.exe`（configure.bat 会把它转成编译宏），否则 CMake 会误选 PATH 里的 clang（VS2026 的 vcvars 会加入 clang），触发 STL1009 / WinRT 私有头缺失。MSVC 初始化步骤额外固定 `CC=CXX=cl` 作为双保险。
+- Qt6 的编译/安装参考 [yuanpeirong/buildQt 的 `shared-debug-and-release` 分支](https://github.com/yuanpeirong/buildQt/tree/shared-debug-and-release)：用 `cmake --build . --parallel`（不显式指定 config）+ `ninja install`（该项目的注释指出 `cmake --install` 会漏装文件），并把 `[paths] Prefix = ..` 的 `qt.conf` 放进安装前缀 `bin`。工作流另有兜底：若 `debug-and-release` 产物缺少 Debug 或 Release 的核心库，会补编+补装该配置。7z 压缩级别降到 `-mx=5`，给 6 小时上限留出打包时间。configure 也加了 `-opengl desktop`（与参考一致）。
 - Qt 6.12.1 + `Ninja Multi-Config` 的已知缺陷：部分自包含 QML 工具模块（如 `qmltime`）的 `.qmltypes` 生成目标未纳入构建图，但 install 规则仍引用它，导致 `file(INSTALL) cannot find ...: File exists`（该报错里的 `File exists` 是残留 errno，真实原因是文件缺失）。构建脚本在所有配置编译完成后、install 前扫描 install 脚本并为缺失的 `.qmltypes` 补最小占位文件；同时先把 `Debug`/`Release` 都编译完再统一安装。
 - 所有可选 `curl` 下载后都会清零 `$LASTEXITCODE`，避免 404（例如缺失的 md5sums）让 PowerShell 步骤误判失败。
 

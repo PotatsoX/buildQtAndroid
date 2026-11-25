@@ -361,7 +361,7 @@ jobs:
           # 不能用 -DCMAKE_CXX_COMPILER=cl.exe：configure.bat 会把 -D 收进 QT_EXTRA_DEFINES（编译宏），
           # 于是 CMake 自行探测，在 VS2026 环境里会选中 vcvars 加入 PATH 的 clang（win32-clang-msvc），
           # 进而触发 STL1009 与 WinRT 私有头缺失。
-          $cfg = @('-opensource', '-confirm-license', '-prefix', $prefix, '-platform', $env:PLATFORM_SPEC)
+          $cfg = @('-opensource', '-confirm-license', '-prefix', $prefix, '-platform', $env:PLATFORM_SPEC, '-opengl', 'desktop')
           if ($env:LINKAGE -eq 'static-release') {
             $cfg += @('-static', '-release')
             if ($env:TOOLCHAIN -eq 'msvc') { $cfg += '-static-runtime' }
@@ -381,25 +381,37 @@ jobs:
             Write-Output "configure: $cfgLine"
             & (Join-Path $env:QT_SRC 'configure.bat') @cfg
             if ($LASTEXITCODE -ne 0) { throw "Qt6 configure 失败" }
+            # 参考 yuanpeirong/buildQt 的 shared-debug-and-release 分支：
+            # 用 cmake --build . --parallel（不显式指定 config）+ ninja install。
+            # 参考项目注释指出 cmake --install 会漏装文件，ninja install 才完整。
+            & cmake --build . --parallel
+            if ($LASTEXITCODE -ne 0) { throw "Qt6 编译失败" }
+            Ensure-QmltimeTypes
+            & ninja install
+            if ($LASTEXITCODE -ne 0) { throw "Qt6 安装失败" }
+
+            # 兜底：debug-and-release 必须同时有 Debug/Release 的核心库。
+            # 某些生成器配置下 ninja install 只装默认配置，这里补编+补装缺失的那个。
             if ($env:LINKAGE -eq 'shared-debug-and-release') {
-              # 先把所有配置都编译完，再统一安装。避免某个配置独占生成的文件
-              # （如 qmltypes）在另一个配置的 install 阶段还没就绪。
               foreach ($config in @('Debug', 'Release')) {
-                & cmake --build . --config $config --parallel
-                if ($LASTEXITCODE -ne 0) { throw "Qt6 编译失败 ($config)" }
+                $suffix = if ($config -eq 'Debug') { 'd' } else { '' }
+                $marker = if ($env:LINKAGE -eq 'static-release') {
+                  Join-Path $prefix "lib\libQt6Core$suffix.a"
+                } else {
+                  Join-Path $prefix "bin\Qt6Core$suffix.dll"
+                }
+                if (-not (Test-Path -LiteralPath $marker)) {
+                  Write-Output "补齐缺失配置: $config（未找到 $marker）"
+                  & cmake --build . --config $config --parallel
+                  if ($LASTEXITCODE -ne 0) { throw "Qt6 补编译失败 ($config)" }
+                  Ensure-QmltimeTypes
+                  & cmake --install . --config $config
+                  if ($LASTEXITCODE -ne 0) { throw "Qt6 补安装失败 ($config)" }
+                }
               }
-              Ensure-QmltimeTypes
-              foreach ($config in @('Debug', 'Release')) {
-                & cmake --install . --config $config
-                if ($LASTEXITCODE -ne 0) { throw "Qt6 安装失败 ($config)" }
-              }
-            } else {
-              & cmake --build . --parallel
-              if ($LASTEXITCODE -ne 0) { throw "Qt6 编译失败" }
-              Ensure-QmltimeTypes
-              & cmake --install .
-              if ($LASTEXITCODE -ne 0) { throw "Qt6 安装失败" }
             }
+            # 与参考项目一致：前缀自带 qt.conf，保证解压后 qmake/qmake6 能定位 prefix
+            "[paths]`nPrefix = .." | Set-Content -Path (Join-Path $prefix 'bin\qt.conf') -Encoding ASCII
           } finally {
             Pop-Location
             $global:LASTEXITCODE = 0
@@ -477,7 +489,7 @@ jobs:
           if ($freeGB -lt ($srcGB * 1.2 + 2)) {
             throw "D: 可用空间不足（安装目录 ${srcGB} GB，可用 ${freeGB} GB），无法创建压缩包"
           }
-          & 7z a -t7z -mx=7 $archive "$env:QT_PREFIX"
+          & 7z a -t7z -mx=5 $archive "$env:QT_PREFIX"
           if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0; throw "打包失败" }
           $global:LASTEXITCODE = 0
           Get-Item -LiteralPath $archive | Select-Object FullName, @{n='SizeGB';e={[math]::Round($_.Length/1GB,2)}} | Format-List
