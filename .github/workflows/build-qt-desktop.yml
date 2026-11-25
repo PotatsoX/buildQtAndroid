@@ -277,9 +277,12 @@ jobs:
             if (-not (Test-Path (Join-Path $env:QT_SRC $m))) { Write-Output "跳过不存在的模块: $m"; continue }
             $skipArgs += @('-skip', $m)
           }
-          # MinGW 不支持 QtWebEngine（Chromium 工具链要求 MSVC，参考项目也明确 -skip qtwebengine）
-          if ($env:TOOLCHAIN -eq 'mingw' -and (@($env:SKIP_MODULES -split '[\s,]+') -notcontains 'qtwebengine')) {
-            $skipArgs += @('-skip', 'qtwebengine')
+          # MinGW 不支持 QtWebEngine（Chromium 工具链要求 MSVC，参考项目也明确 -skip qtwebengine）；
+          # QtWebView 在 Windows 上依赖 MSVC 的 WebView2 插件或 QtWebEngine，MinGW 两者都拿不到，一并跳过。
+          if ($env:TOOLCHAIN -eq 'mingw') {
+            foreach ($m in @('qtwebengine', 'qtwebview')) {
+              if (@($env:SKIP_MODULES -split '[\s,]+') -notcontains $m) { $skipArgs += @('-skip', $m) }
+            }
           }
           $cfg = @('-opensource', '-confirm-license', "-prefix", $prefix, '-platform', $env:PLATFORM_SPEC)
           if ($env:LINKAGE -eq 'static-release') {
@@ -361,9 +364,12 @@ jobs:
             if (-not (Test-Path (Join-Path $env:QT_SRC $m))) { Write-Output "跳过不存在的模块: $m"; continue }
             $skipArgs += @('-skip', $m)
           }
-          # MinGW 不支持 QtWebEngine；MSVC 目标按用户输入保留
-          if ($env:TOOLCHAIN -eq 'mingw' -and (@($env:SKIP_MODULES -split '[\s,]+') -notcontains 'qtwebengine')) {
-            $skipArgs += @('-skip', 'qtwebengine')
+          # MinGW 不支持 QtWebEngine；QtWebView 在 Windows 上也没有 MinGW 可用的后端，一并跳过。
+          # MSVC 目标按用户输入保留。
+          if ($env:TOOLCHAIN -eq 'mingw') {
+            foreach ($m in @('qtwebengine', 'qtwebview')) {
+              if (@($env:SKIP_MODULES -split '[\s,]+') -notcontains $m) { $skipArgs += @('-skip', $m) }
+            }
           }
           # Qt6 configure 依赖 -platform <mkspec> 来推导编译器（win32-msvc -> cl，win32-g++ -> g++）。
           # 不能用 -DCMAKE_CXX_COMPILER=cl.exe：configure.bat 会把 -D 收进 QT_EXTRA_DEFINES（编译宏），
