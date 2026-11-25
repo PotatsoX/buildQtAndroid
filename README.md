@@ -119,7 +119,7 @@ qtgrpc qtserialbus qtscxml qtopcua qtremoteobjects qtactiveqt qtwayland qttasktr
 
 这套值来自 Android 流程的实测调优；`-no-feature-*` 只对 Qt 6 生效（Qt 5 的 feature 名称不同，会忽略），源码中不存在的模块名也会自动忽略。代价是产物不再是"全模块完整桌面版"（缺 gRPC、OPC UA、WebChannel 等），换来的是构建能压进 GitHub 托管 runner 的 6 小时 job 上限。
 
-流程（`linkage=shared-debug-and-release` 且 Qt6）：准备矩阵 → 为 Qt6 目标生成 Debug/Release 两份矩阵 → **两个 job 并行**：各自安装工具链、configure（`-debug` 或 `-release` 单配置）、build、`cmake --install --strip` 到 `D:\qt-desktop\install\<compiler>`，把前缀按 `qt-desktop-prefix-<版本>-<编译器>-<配置>-<sha>` 存入缓存 → `package-qt6` job 依次还原 Debug/Release 缓存到同一前缀，写 `qt.conf` 与合并后的 `BUILD-INFO.txt` → 检查空间后用 7z（`-mx=5`）打包并上传 artifact `Qt_<版本>-<链接方式>_<编译器>`。Qt5 与 `static-release` 仍走原来的单 job 流程（configure / build / install → 清理 → 打包）。MSVC 由 VS 2026 的 `vcvars64.bat` 初始化（不用 `ilammy/msvc-dev-cmd`，其 vswhere 版本区间匹配不到 18.12）。推送 `qt-desktop-*` tag 时会额外发布 Release 附件。
+流程（`linkage=shared-debug-and-release` 且 Qt6）：准备矩阵 → 为 Qt6 目标生成 Debug/Release 两份矩阵 → **两个 job 并行**：各自调用同一个复合 action `.github/actions/setup-qt-toolchain`（安装 CMake/Ninja/Perl/MinGW、按需初始化 MSVC、下载解压源码）、configure（`-debug` 或 `-release` 单配置）、build、`cmake --install --strip` 到 `D:\qt-desktop\install\<compiler>`，把前缀按 `qt-desktop-prefix-<版本>-<编译器>-<配置>-<sha>` 存入缓存 → `package-qt6` job 依次还原 Debug/Release 缓存到同一前缀，写 `qt.conf` 与合并后的 `BUILD-INFO.txt` → 检查空间后用 7z（`-mx=5`）打包并上传 artifact `Qt_<版本>-<链接方式>_<编译器>`。Qt5 与 `static-release` 仍走原来的单 job 流程（同样的复合 action → configure / build / install → 清理 → 打包）。MSVC 由 VS 2026 的 `vcvars64.bat` 初始化（不用 `ilammy/msvc-dev-cmd`，其 vswhere 版本区间匹配不到 18.12）。推送 `qt-desktop-*` tag 时会额外发布 Release 附件。
 
 注意事项：
 
@@ -674,6 +674,9 @@ Qt 6.12 里 Android 的 `Qt6Android.jar` 由源码树内的 Gradle 工程构建�
 
 ```
 .github/workflows/build-qt-android.yml   # host（源码自建）+ target 构建工作流
-scripts/fetch-qt-source.ps1             # 下载（md5 校验，official_releases/archive 双地址）/全量解压
-scripts/verify-android-prefix.py        # 产物 ABI 与结构校验 + manifest
+.github/workflows/build-qt-desktop.yml   # 桌面版构建（Qt5/Qt6 × MSVC/MinGW）
+.github/actions/setup-qt-toolchain/      # 复合 action：工具链安装 / MSVC 初始化 / 源码下载解压（两个桌面 job 共用）
+scripts/fetch-qt-source.ps1              # 下载（md5 校验，official_releases/archive 双地址）/全量解压
+scripts/verify-android-prefix.py         # 产物 ABI 与结构校验 + manifest
+scripts/ensure-qmltypes.ps1              # 为 install 规则引用但未生成的 .qmltypes 补占位文件
 ```
