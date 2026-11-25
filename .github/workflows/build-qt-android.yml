@@ -79,7 +79,6 @@ jobs:
       CMAKE_VERSION: 4.3.2
       MINGW_VERSION: 15.1.0
       NINJA_VERSION: 1.10.2
-      PERL_VERSION: 5.42.2.1
 
     steps:
       - name: Checkout
@@ -177,13 +176,13 @@ jobs:
 
           # MinGW 只在 host 构建步骤里下载使用；target 用 NDK clang
 
-          # CMake 4.3.2
-          Get-File 'https://github.com/Kitware/CMake/releases/download/v4.3.2/cmake-4.3.2-windows-x86_64.zip' "$env:TOOLS_DIR\cmake.zip"
+          # CMake（URL 由 env CMAKE_VERSION 决定，避免版本号与实际下载不一致）
+          Get-File "https://github.com/Kitware/CMake/releases/download/v$env:CMAKE_VERSION/cmake-$env:CMAKE_VERSION-windows-x86_64.zip" "$env:TOOLS_DIR\cmake.zip"
           Expand-Archive "$env:TOOLS_DIR\cmake.zip" "$env:TOOLS_DIR\cmake-tmp" -Force
-          Move-Item "$env:TOOLS_DIR\cmake-tmp\cmake-4.3.2-windows-x86_64" "$env:TOOLS_DIR\cmake" -Force
+          Move-Item "$env:TOOLS_DIR\cmake-tmp\cmake-$env:CMAKE_VERSION-windows-x86_64" "$env:TOOLS_DIR\cmake" -Force
 
-          # Ninja 1.10.2
-          Get-File 'https://github.com/ninja-build/ninja/releases/download/v1.10.2/ninja-win.zip' "$env:TOOLS_DIR\ninja.zip"
+          # Ninja（同上，URL 由 env NINJA_VERSION 决定）
+          Get-File "https://github.com/ninja-build/ninja/releases/download/v$env:NINJA_VERSION/ninja-win.zip" "$env:TOOLS_DIR\ninja.zip"
           Expand-Archive "$env:TOOLS_DIR\ninja.zip" "$env:TOOLS_DIR\ninja" -Force
 
           # Strawberry Perl 便携版（Qt 构建脚本依赖 perl；官方页未列该版本）
@@ -496,7 +495,7 @@ jobs:
             curl.exe -L --fail --retry 5 --retry-delay 10 --max-time 1800 --noproxy '*' -o $Out $Url
             if ($LASTEXITCODE -ne 0) { throw "下载失败: $Url" }
           }
-          Get-File 'https://github.com/niXman/mingw-builds-binaries/releases/download/15.1.0-rt_v12-rev0/x86_64-15.1.0-release-posix-seh-msvcrt-rt_v12-rev0.7z' "$env:TOOLS_DIR\mingw.7z"
+          Get-File "https://github.com/niXman/mingw-builds-binaries/releases/download/$env:MINGW_VERSION-rt_v12-rev0/x86_64-$env:MINGW_VERSION-release-posix-seh-msvcrt-rt_v12-rev0.7z" "$env:TOOLS_DIR\mingw.7z"
           & $env:SEVEN_ZIP x -y "-o$env:TOOLS_DIR" "$env:TOOLS_DIR\mingw.7z"
           if ($LASTEXITCODE -ne 0) { throw 'MinGW 解压失败' }
           $env:PATH = "$env:TOOLS_DIR\mingw64\bin;$env:PATH"
@@ -875,7 +874,7 @@ jobs:
           )
           foreach ($cmd in $smoke) {
             $exe = Join-Path $env:HOST_PREFIX "bin\$($cmd[0])"
-            if (-not (Test-Path $exe)) { throw "裁剪后缺少工具 $($cmd[0])（可用 host_tools=full 复跑对比）" }
+            if (-not (Test-Path $exe)) { throw "裁剪后缺少工具 $($cmd[0])（可临时把本 workflow env HOST_TOOLS 改为 full 复跑对比）" }
             & $exe @($cmd[1..($cmd.Count - 1)]) 2>&1 | Out-Null
             if ($LASTEXITCODE -in @(-1073741515, -1073741511)) { throw "精简后 $($cmd[0]) 无法运行（缺运行库 DLL）" }
           }
@@ -1078,7 +1077,7 @@ jobs:
             'qsb.exe', 'qmlcachegen.exe', 'qmlimportscanner.exe', 'qmltyperegistrar.exe', 'qmltc.exe',
             'lrelease.exe', 'lupdate.exe', 'lconvert.exe', 'cmake_automoc_parser.exe')
           $miss = @($need | Where-Object { -not (Test-Path (Join-Path "$env:HOST_PREFIX\bin" $_)) })
-          if ($miss.Count -gt 0) { throw "裁剪后缺少工具：$($miss -join ', ')（可用 host_tools=full 复跑对比）" }
+          if ($miss.Count -gt 0) { throw "裁剪后缺少工具：$($miss -join ', ')（可临时把本 workflow env HOST_TOOLS 改为 full 复跑对比）" }
           # androiddeployqt --help 按设计返回 1（main.cpp 的 SyntaxErrorOrHelpRequested），帮助文本写 stderr
           # 以 "Syntax: androiddeployqt" 开头；用退出码集合 + 帮助文本共同判定，能证明 exe 与 Qt6Core 依赖齐全
           $adqOut = (& "$env:HOST_PREFIX\bin\androiddeployqt.exe" --help 2>&1 | Out-String)

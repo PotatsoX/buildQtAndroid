@@ -46,7 +46,6 @@ jobs:
   prepare:
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ steps.plan.outputs.matrix }}
       legacy_matrix: ${{ steps.plan.outputs.legacy_matrix }}
       qt6_matrix: ${{ steps.plan.outputs.qt6_matrix }}
       qt6_targets: ${{ steps.plan.outputs.qt6_targets }}
@@ -74,7 +73,6 @@ jobs:
             echo "Unknown target" >&2
             exit 1
           fi
-          echo "matrix=$(echo "$SELECTED" | jq -c .)" >> "$GITHUB_OUTPUT"
           QT6_TARGETS=$(echo "$SELECTED" | jq -c 'map(select(.qt_major == "6.12"))')
           QT6_MATRIX=$(echo "$QT6_TARGETS" | jq -c '[.[] as $t | ($t + {config: "Debug"}), ($t + {config: "Release"})]')
           LEGACY=$(echo "$SELECTED" | jq -c --arg link "${{ inputs.linkage || 'shared-debug-and-release' }}" 'map(select(.qt_major != "6.12" or $link != "shared-debug-and-release"))')
@@ -100,7 +98,6 @@ jobs:
     timeout-minutes: 360
     env:
       QT_VERSION: ${{ matrix.qt_version }}
-      QT_MAJOR_MINOR: ${{ matrix.qt_major }}
       COMPILER: ${{ matrix.compiler }}
       CONFIG: ${{ matrix.config }}
       TOOLCHAIN: ${{ matrix.toolchain }}
@@ -206,9 +203,24 @@ jobs:
               "$key=$value" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
             }
           }
-          $newPath | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          # Debug 配置的 Qt 工具（rcc/moc/uic）需要调试 CRT：vcvars 不会把 debug_nonredist
+          # 与 ucrtbased.dll 所在目录加进 PATH，缺失时 rcc.exe 会以 0xc0000135 退出。
+          # 本 job 只编一个配置，但 Debug 这一份必须补；Release 补了也无害。
+          $debugDirs = @()
+          $debugDirs += Get-ChildItem 'C:\Program Files\Microsoft Visual Studio\18\*\VC\Redist\MSVC\*\debug_nonredist\x64\Microsoft.*' -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
+          $debugDirs += Get-ChildItem 'C:\Program Files (x86)\Microsoft Visual Studio\18\*\VC\Redist\MSVC\*\debug_nonredist\x64\Microsoft.*' -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
+          $debugDirs += Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\*\x64\ucrtbased.dll' -File -ErrorAction SilentlyContinue | ForEach-Object { $_.Directory.FullName }
+          $debugDirs += Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\*\ucrt\x64\ucrtbased.dll' -File -ErrorAction SilentlyContinue | ForEach-Object { $_.Directory.FullName }
+          $debugDirs += Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Redist\ucrt\DLLs\x64\ucrtbased.dll' -File -ErrorAction SilentlyContinue | ForEach-Object { $_.Directory.FullName }
+          $debugDirs = @($debugDirs | Where-Object { $_ } | Select-Object -Unique)
+          if ($debugDirs.Count -eq 0) { Write-Warning '未找到 MSVC 调试运行库目录；Debug 版 Qt 工具可能以 0xc0000135 失败' }
+          Write-Output "Debug CRT dirs: $($debugDirs -join '; ')"
+          $newPath = @($debugDirs) + $newPath
+
           if ($newPath.Count -gt 0) {
+            # GITHUB_PATH 只对后续 step 生效；当前 step 也要立刻能看到 cl.exe
             $env:Path = (($newPath + ($env:Path -split ';')) | Where-Object { $_ } | Select-Object -Unique) -join ';'
+            $newPath | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
           }
           $global:LASTEXITCODE = 0
           & cl.exe /? | Select-Object -First 1
@@ -352,6 +364,14 @@ jobs:
           $prefix = Join-Path $env:PREFIX $env:COMPILER
           foreach ($f in @('BUILD-INFO-Debug.txt', 'BUILD-INFO-Release.txt')) {
             if (-not (Test-Path -LiteralPath (Join-Path $prefix $f))) { throw "缓存缺失: $f" }
+          }
+          # 两份缓存按顺序解到同一目录，后者会覆盖同名文件；必须确认两个配置的核心库都在，
+          # 否则说明合并丢了文件（例如某个配置的 Targets/配置专用文件被另一份覆盖）。
+          $missing = @(@('Qt6Cored.dll', 'Qt6Core.dll') | Where-Object {
+            -not (Test-Path -LiteralPath (Join-Path $prefix "bin\$_"))
+          })
+          if ($missing.Count -gt 0) {
+            throw "合并后的前缀缺少核心库：$($missing -join ', ')（Debug/Release 缓存可能互相覆盖）"
           }
           $dlls = @(Get-ChildItem (Join-Path $prefix 'bin') -Filter 'Qt6Core*.dll' -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
           Write-Output "Qt6Core DLLs: $($dlls -join ', ')"
@@ -704,6 +724,8 @@ jobs:
           # 于是 CMake 自行探测，在 VS2026 环境里会选中 vcvars 加入 PATH 的 clang（win32-clang-msvc），
           # 进而触发 STL1009 与 WinRT 私有头缺失。
           $cfg = @('-opensource', '-confirm-license', '-prefix', $prefix, '-platform', $env:PLATFORM_SPEC, '-opengl', 'desktop')
+          # 当前矩阵下 Qt6 只以 static-release 进入本 job（shared 由 build-qt6-config 处理）；
+          # else 分支仅作防御：将来若把 Qt6 shared 放回 legacy_matrix 仍能正确配置。
           if ($env:LINKAGE -eq 'static-release') {
             $cfg += @('-static', '-release')
             if ($env:TOOLCHAIN -eq 'msvc') { $cfg += '-static-runtime' }
@@ -731,27 +753,8 @@ jobs:
             Ensure-QmltimeTypes
             & ninja install
             if ($LASTEXITCODE -ne 0) { throw "Qt6 安装失败" }
-
-            # 兜底：debug-and-release 必须同时有 Debug/Release 的核心库。
-            # 某些生成器配置下 ninja install 只装默认配置，这里补编+补装缺失的那个。
-            if ($env:LINKAGE -eq 'shared-debug-and-release') {
-              foreach ($config in @('Debug', 'Release')) {
-                $suffix = if ($config -eq 'Debug') { 'd' } else { '' }
-                $marker = if ($env:LINKAGE -eq 'static-release') {
-                  Join-Path $prefix "lib\libQt6Core$suffix.a"
-                } else {
-                  Join-Path $prefix "bin\Qt6Core$suffix.dll"
-                }
-                if (-not (Test-Path -LiteralPath $marker)) {
-                  Write-Output "补齐缺失配置: $config（未找到 $marker）"
-                  & cmake --build . --config $config --parallel
-                  if ($LASTEXITCODE -ne 0) { throw "Qt6 补编译失败 ($config)" }
-                  Ensure-QmltimeTypes
-                  & cmake --install . --config $config
-                  if ($LASTEXITCODE -ne 0) { throw "Qt6 补安装失败 ($config)" }
-                }
-              }
-            }
+            # 注意：本 job 只承载 static-release（单配置）的 Qt6；shared-debug-and-release 已由
+            # build-qt6-config 的两个单配置 job 完成，不再需要“补齐另一配置”的兜底逻辑。
             # 与参考项目一致：前缀自带 qt.conf，保证解压后 qmake/qmake6 能定位 prefix
             "[paths]`nPrefix = .." | Set-Content -Path (Join-Path $prefix 'bin\qt.conf') -Encoding ASCII
           } finally {

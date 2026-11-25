@@ -126,12 +126,12 @@ qtgrpc qtserialbus qtscxml qtopcua qtremoteobjects qtactiveqt qtwayland qttasktr
 - **Qt 5.15.19 + MSVC 2026 不是 Qt 官方支持组合**（Qt 5.15 官方支持到 MSVC 2019）；mkspec 没有硬编码的 `MSC_VER` 上限，但如遇编译错误，请改用 `qt5-mingw810_64` 或自行调整。
 - Qt 5.15.19 源码包在 `archive/qt/5.15/5.15.19`，约 1.13 GB；Qt 6.12.1 在 `official_releases/qt/6.12/6.12.1`，约 579 MB。标准 runner 的 D: 盘约 14 GB，完整 debug+release 构建会接近上限；install 完成后工作流会自动删除 build 目录与解压源码树（源码压缩包仍在 `actions/cache` 中，不影响复用），打包前检查可用空间，避免 7z 因 `There is not enough space on the disk` 失败。
 - GitHub 托管 runner 的 job 执行上限硬限 6 小时（到限后 job 以 `cancelled` 结束，`timeout-minutes: 360` 已经到顶），完整构建曾在这个边界超时；默认 `skip_modules` 因此采用上面的调优集合，但**保留 QtWebEngine**。Qt6 的 `shared-debug-and-release` 进一步拆成 Debug/Release 两个并行 job：限制是按 job 算而不是按 workflow 算，单配置编译约 3 小时，两个 runner 各有自己的 4 核，总墙钟也降到约 3 小时。job 之间用 `actions/cache` 传 install 前缀（artifact 免费 500 MB 装不下；缓存每仓库 10 GB），缓存 key 含 commit sha，避免混用不同提交的前缀。若仍超时，可再临时把 `qtquick3d`、`qtquick3dphysics` 等重模块加进 `skip_modules`。
-- Qt 6 的 `-debug-and-release` 只在多配置生成器下生效：configure 检测到 `ninja` 且需要 debug+release 时会自动使用 `Ninja Multi-Config`，安装时分别对 `Debug`/`Release` 执行 `cmake --install`。
+- Qt 6 的 `-debug-and-release` 只在多配置生成器下生效（configure 检测到 `ninja` 时会切到 `Ninja Multi-Config`）。本仓库的 Qt6 shared 构建**不再依赖它**：拆成 `-debug` / `-release` 两个单配置 job 各自 `cmake --install`；Qt5 的 `-shared -debug-and-release` 仍由 qmake 生成的单一 Makefile 一次编完两个配置。
 - MSVC + `shared-debug-and-release` 会在构建过程中运行 Debug 版 `rcc`/`moc`/`uic`：除 vcvars 外，还把 VS 的 `debug_nonredist` 与 Windows SDK 的 `ucrtbased.dll` 目录放进 PATH，并把 `build/qtbase/{bin,lib}/{Debug,Release}` 放进 PATH，避免 `0xc0000135`（DLL not found）。
 - MSVC 目标 configure 必须传 `-platform win32-msvc`（由矩阵 `platform` 提供），Qt 靠它推导编译器为 `cl`；不能用 `-DCMAKE_CXX_COMPILER=cl.exe`（configure.bat 会把它转成编译宏），否则 CMake 会误选 PATH 里的 clang（VS2026 的 vcvars 会加入 clang），触发 STL1009 / WinRT 私有头缺失。MSVC 初始化步骤额外固定 `CC=CXX=cl` 作为双保险。
-- Qt6 的编译/安装参考 [yuanpeirong/buildQt 的 `shared-debug-and-release` 分支](https://github.com/yuanpeirong/buildQt/tree/shared-debug-and-release)：用 `cmake --build . --parallel`（不显式指定 config）+ `ninja install`（该项目的注释指出 `cmake --install` 会漏装文件），并把 `[paths] Prefix = ..` 的 `qt.conf` 放进安装前缀 `bin`。工作流另有兜底：若 `debug-and-release` 产物缺少 Debug 或 Release 的核心库，会补编+补装该配置。7z 压缩级别降到 `-mx=5`，给 6 小时上限留出打包时间。configure 也加了 `-opengl desktop`（与参考一致）。
+- Qt6 `static-release`（走单 job 的 legacy 流程）的编译/安装参考 [yuanpeirong/buildQt 的 `shared-debug-and-release` 分支](https://github.com/yuanpeirong/buildQt/tree/shared-debug-and-release)：用 `cmake --build . --parallel` + `ninja install`（该项目的注释指出 `cmake --install` 会漏装文件），并把 `[paths] Prefix = ..` 的 `qt.conf` 放进安装前缀 `bin`；configure 也加了 `-opengl desktop`（与参考一致）。Qt6 shared 的两个单配置 job 用 `cmake --install . --strip`，7z 压缩级别为 `-mx=5`，给 6 小时上限留出打包时间。
 - MinGW 目标（`qt5-mingw810_64` / `qt6-mingw1510_64`）**强制 `-skip qtwebengine -skip qtwebview`**：QtWebEngine 基于 Chromium，Windows 上需要 MSVC 工具链，参考项目也明确跳过；MSVC 目标按 `skip_modules` 输入决定是否保留。QtWebView 模块源码本身能被 MinGW 编译，但它的 Windows 后端只有两个：WebView2 插件（`qtwebview` 的 `configure.cmake` 里条件是 `WIN32 AND MSVC AND WebView2_FOUND`，MinGW 无法启用）和依赖 QtWebEngine 的插件（MinGW 已跳过 WebEngine），所以编出来也没有可用渲染后端，直接跳过更干净。
-- Qt 6.12.1 + `Ninja Multi-Config` 的已知缺陷：部分自包含 QML 工具模块（如 `qmltime`）的 `.qmltypes` 生成目标未纳入构建图，但 install 规则仍引用它，导致 `file(INSTALL) cannot find ...: File exists`（该报错里的 `File exists` 是残留 errno，真实原因是文件缺失）。构建脚本在所有配置编译完成后、install 前扫描 install 脚本并为缺失的 `.qmltypes` 补最小占位文件；同时先把 `Debug`/`Release` 都编译完再统一安装。
+- Qt 6.12.1 + `Ninja Multi-Config` 的已知缺陷：部分自包含 QML 工具模块（如 `qmltime`）的 `.qmltypes` 生成目标未纳入构建图，但 install 规则仍引用它，导致 `file(INSTALL) cannot find ...: File exists`（该报错里的 `File exists` 是残留 errno，真实原因是文件缺失）。两个 Qt6 job 都在 install 前扫描 `cmake_install.cmake`，为缺失的 `.qmltypes` 补最小占位文件；单配置构建理论上不触发该缺陷，保留该逻辑作为兜底。
 - 所有可选 `curl` 下载后都会清零 `$LASTEXITCODE`，避免 404（例如缺失的 md5sums）让 PowerShell 步骤误判失败。
 
 ## 工作流使用的 Action 版本
@@ -216,7 +216,7 @@ qtwebengine qtgrpc qtserialbus qtscxml qtopcua qtremoteobjects qtactiveqt qtwayl
 
 收益（run #9 产物 `plugins/imageformats` 实测，android arm64-v8a）：共 8 个插件 **1.20 MB/ABI**，`qtiff` 已不产出（关闭生效）；保留项为 `qjpeg` 496.9、`qwebp` 460.8、`qicns` 64.5、`qico` 50.6、`qgif` 45.8、`qsvg` 39.4、`qtga` 36.4、`qwbmp` 32.9 KB。对比 Qt 5.15.2 关闭前的 1.46 MB，约省 0.26 MB/ABI。构建期还少编 bundled libtiff（约 40 个 C 文件）。`qtga`/`qwbmp`/`qicns` 无法用 configure 关闭，合计 133.8 KB。
 
-### host 模块集（输入 `host_modules`）
+### host 模块集（固定 env `HOST_MODULES`）
 
 反推依据：`lib/cmake/Qt6<Module>/Qt6<Module>Dependencies.cmake` 的 `__qt_<Module>_tool_deps` 声明交叉编译时要从 host 前缀取哪些工具包；工具包 `Qt6<Module>Tools` 由 `lib/cmake/Qt6<Module>Tools/Qt6<Module>ToolsConfig.cmake` 导出 `Qt6::<tool>` 导入目标，指向 `${_IMPORT_PREFIX}/bin/<tool>.exe`。
 
@@ -248,7 +248,7 @@ qtwebengine qtgrpc qtserialbus qtscxml qtopcua qtremoteobjects qtactiveqt qtwayl
 
 按默认 `skip_modules` 被过滤掉的 4 个：`qtscxml`、`qtremoteobjects`、`qtgrpc`、`qtopcua`。因此默认 host 生效集合为：`qtbase`、`qtsvg`、`qtdeclarative`、`qtshadertools`、`qttools`、`qtquick3d`、`qtquick3dphysics`、`qtquicktimeline`、`qtlottie`、`qtcanvaspainter`。
 
-`host_modules` 取值：
+`HOST_MODULES` 取值（workflow 固定 env，已不是 `workflow_dispatch` 输入项；需改动时直接改文件）：
 
 | 取值 | 行为 |
 |---|---|
@@ -363,7 +363,7 @@ cmake -S <your-app> -B build `
 
 > **`QT_HOST_PATH` 现在可省略**：`Relocate prefixes` 步骤已把 target 前缀里的绝对路径改成相对表达式（`${Qt6_DIR}/../../../../host`），`target/bin/qmake*.bat` 也改成 `%~dp0..\..\host\bin\…`，所以只要 `CMAKE_PREFIX_PATH` 指向解压出来的 target 前缀，`find_package(Qt6)` 就能按同级目录自己找到 `host\`。显式传 `-DQT_HOST_PATH` 仍然有效（优先级更高），用于把 host 放到别的目录。构建期冒烟会跑一次**不传** `QT_HOST_PATH` 的配置来证明这一点。
 
-> host 前缀只提供工具，交叉编译的库与头文件都来自 `target` 前缀，两者不存在能力差异。host 默认只含 10 个工具模块（白名单 14 个，减去默认 skip 的 4 个，见「host 模块集」），`bin` 又按 Android 构建链路的白名单裁剪（见「host 前缀内容与用途」）：`designer`/`assistant`/`linguist` 等桌面工具不在其中，这些不参与 Android 构建。若工程用到白名单之外的模块工具，configure 会报找不到工具——此时在 `host_modules` 里把该模块加进去重跑；若怀疑是裁得太狠（被排除的工具仍被 `Qt6*ToolsTargets` 引用），用 `host_tools=full` 复跑对比。
+> host 前缀只提供工具，交叉编译的库与头文件都来自 `target` 前缀，两者不存在能力差异。host 默认只含 10 个工具模块（白名单 14 个，减去默认 skip 的 4 个，见「host 模块集」），`bin` 又按 Android 构建链路的白名单裁剪（见「host 前缀内容与用途」）：`designer`/`assistant`/`linguist` 等桌面工具不在其中，这些不参与 Android 构建。若工程用到白名单之外的模块工具，configure 会报找不到工具——此时在 `HOST_MODULES` 里把该模块加进去重跑；若怀疑是裁得太狠（被排除的工具仍被 `Qt6*ToolsTargets` 引用），把 `HOST_TOOLS` 临时改为 `full` 复跑对比。
 
 > `host_linkage=static` 只改变 host 前缀结构（`bin` 内无 `Qt6*.dll`），产物仍是 target + host 双前缀，用户侧命令不变（相对路径自动找到同级 host；也可继续用 `-DQT_HOST_PATH` 覆盖）。
 
@@ -402,7 +402,7 @@ cmake -S <your-app> -B build `
 - **明确排除**：`windeployqt`/`wasmdeployqt`/`harmonydeployqt`、`qdbus` 系列、`qhelpgenerator`、`qtattributionsscanner`/`svgtoqml`、`qmltestrunner`/`qmlpreview`/`qmlprofiler`/`ltext2id`/`lcheck`/`qmlaotstats`/`qlalr`/`qmlcontextpropertydump`/`qcshadergen`/`qvkgen`/`cooker`，以及全部 3D 美术工具（`balsam`/`balsamui`/`lightmapviewer`/`meshdebug`/`materialeditor`/`shadergen`/`particleshadergen`/`instancer`/`shapegen`/`lottietoqml`）。名单内若仍是导入目标（如 `qlalr`），导入目标优先，实际保留。
 - **`.cache-ok` 保留在前缀里**：`actions/cache` 在 job 末尾才保存，删掉它下一轮就无法校验缓存命中（会白跑一遍 host 编译）；打包用 `7z -x!.cache-ok` 排除，产物中不含该文件。
 
-**风险**：白名单以导入目标 `IMPORTED_LOCATION` 为准（含静态库），被排除名单里仍属导入目标的工具会保留；裁剪后逐个 `Test-Path` 校验，缺失时报 `<target> -> <path>`。`host_tools=full` 可跳过 `bin` 白名单裁剪。被删清单（逐项文件数与 MB）写入 `D:\qt\prune-report.txt`，汇总进 `BUILD-INFO.txt` 的 `[裁剪记录]` 段。
+**风险**：白名单以导入目标 `IMPORTED_LOCATION` 为准（含静态库），被排除名单里仍属导入目标的工具会保留；裁剪后逐个 `Test-Path` 校验，缺失时报 `<target> -> <path>`。把 `HOST_TOOLS` 临时改为 `full` 可跳过 `bin` 白名单裁剪。被删清单（逐项文件数与 MB）写入 `D:\qt\prune-report.txt`，汇总进 `BUILD-INFO.txt` 的 `[裁剪记录]` 段。
 
 > 产物不是 Windows 桌面开发 SDK：未被导入目标引用的 `lib\*.a` 已删、桌面与美术工具已被裁掉，链接桌面程序会失败；host 前缀只用于交叉编译与 `androiddeployqt`。host 默认只含 10 个工具模块（白名单 14 个，见「host 模块集」）。
 
@@ -616,7 +616,7 @@ Qt 6.12 里 Android 的 `Qt6Android.jar` 由源码树内的 Gradle 工程构建�
 
 - 现象：configure 阶段 `FATAL_ERROR`，指出 `Qt6::moc`、`Qt6::syncqt`、`Qt6::qdoc` 等导入目标指向的 `bin\*.exe` 不存在。
 - 原因：删掉了被 `lib\cmake\**\Qt6*Targets*.cmake` 引用的 exe；CMake include 导出文件时会校验 `IMPORTED_LOCATION`。`Prune host prefix` 的批准排除清单正是这条报错的常见来源；`QT_HOST_PATH` 指错目录同样会报。
-- 处置：先用 `host_tools=full` 复跑，确认是不是裁得太狠；确需该工具时把它加进 `bin` 白名单（或恢复该 exe）；确认真实 host 前缀路径后再传 `QT_HOST_PATH`。
+- 处置：先把 `HOST_TOOLS` 临时改为 `full` 复跑，确认是不是裁得太狠；确需该工具时把它加进 `bin` 白名单（或恢复该 exe）；确认真实 host 前缀路径后再传 `QT_HOST_PATH`。
 
 ### `find_package(Qt6 COMPONENTS <Module>)` 提示找不到 `Qt6<Module>Tools`
 
