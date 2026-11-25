@@ -705,6 +705,7 @@ jobs:
             --sdk "$env:ANDROID_SDK_ROOT" `
             --ndk "$env:ANDROID_NDK_ROOT" `
             --qt-version "$env:QT_VERSION" `
+            --sdk-platform "$env:SDK_PLATFORM" `
             --out "$env:WORK_ROOT\manifest.json"
 
       - name: Prune host prefix (artifact slimming)

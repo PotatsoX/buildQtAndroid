@@ -126,6 +126,11 @@ def main():
     parser.add_argument("--sdk", required=True)
     parser.add_argument("--ndk", required=True)
     parser.add_argument("--qt-version", required=True)
+    parser.add_argument(
+        "--sdk-platform",
+        default="android-37.0",
+        help="SDK platform 目录名（platforms/<name>），默认 android-37.0",
+    )
     parser.add_argument("--out", required=True)
     args = parser.parse_args()
 
@@ -180,8 +185,10 @@ def main():
         pe_files.append(path.name)
 
     # host 前缀必须提供交叉编译所需工具
+    # 注意：不要加入 windeployqt.exe —— 裁剪步骤（HOST_TOOLS=android）会按设计删掉它，
+    # 而本脚本在裁剪之前运行，若记录它，manifest 会声称交付包里有一个实际不存在的工具。
     host_tools = {}
-    for name in ("qmake.exe", "qmake6.exe", "androiddeployqt.exe", "windeployqt.exe"):
+    for name in ("qmake.exe", "qmake6.exe", "androiddeployqt.exe"):
         found = list(host.rglob(name))
         if found:
             host_tools[name] = str(found[0].relative_to(host))
@@ -262,10 +269,12 @@ def main():
         )
 
     ndk_props = read_properties(Path(args.ndk) / "source.properties")
-    platform_props = read_properties(Path(args.sdk) / "platforms" / "android-37.0" / "source.properties")
+    platform_props = read_properties(
+        Path(args.sdk) / "platforms" / args.sdk_platform / "source.properties"
+    )
     if not platform_props:
-        # 兼容 platform 目录名带小版本号
-        candidates = sorted((Path(args.sdk) / "platforms").glob("android-3*"))
+        # 兼容 platform 目录名带小版本号 / 平台版本升级
+        candidates = sorted((Path(args.sdk) / "platforms").glob("android-*"))
         if candidates:
             platform_props = read_properties(candidates[-1] / "source.properties")
 
