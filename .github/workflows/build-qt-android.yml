@@ -8,9 +8,9 @@ on:
         required: false
         default: "6.12.1"
       skip_modules:
-        description: "要跳过/关闭的模块与特性（空格或逗号分隔）：模块名走 -skip，以 - 开头的原样传给 configure（如 -no-feature-printsupport）。默认 qtwebengine + 10 个模块 + 3 个 feature（含关闭 tiff，保留 png/jpeg/webp/svg/ico/gif）"
+        description: "要跳过/关闭的模块与特性（空格或逗号分隔）：模块名走 -skip，以 - 开头的原样传给 configure（如 -no-feature-spatialaudio）。默认 qtwebengine + 9 个模块 + 2 个 feature（关 spatialaudio、tiff；保留 printsupport 与完整 qtscxml/QtStateMachine）"
         required: false
-        default: "qtwebengine qtgrpc qtserialbus qtscxml qtopcua qtremoteobjects qtactiveqt qtwayland qttasktree qtcoap qtwebchannel -no-feature-printsupport -no-feature-spatialaudio -no-feature-tiff"
+        default: "qtwebengine qtgrpc qtserialbus qtopcua qtremoteobjects qtactiveqt qtwayland qttasktree qtcoap qtwebchannel -no-feature-spatialaudio -no-feature-tiff"
       abi:
         description: "目标 ABI（官方 CI 对照行用 armeabi-v7a）"
         required: false
@@ -51,7 +51,7 @@ jobs:
       QT_VERSION: ${{ inputs.qt_version || '6.12.1' }}
       # 固定值（不再作为 workflow 输入）：OpenSSL 3.5.4 对齐 Qt 6.12 Tools and Versions
       OPENSSL_VERSION: '3.5.4'
-      QT_SKIP_MODULES: ${{ inputs.skip_modules || 'qtwebengine qtgrpc qtserialbus qtscxml qtopcua qtremoteobjects qtactiveqt qtwayland qttasktree qtcoap qtwebchannel -no-feature-printsupport -no-feature-spatialaudio -no-feature-tiff' }}
+      QT_SKIP_MODULES: ${{ inputs.skip_modules || 'qtwebengine qtgrpc qtserialbus qtopcua qtremoteobjects qtactiveqt qtwayland qttasktree qtcoap qtwebchannel -no-feature-spatialaudio -no-feature-tiff' }}
       # 只编 target 构建会用到的工具模块（auto 白名单），不做全量 host
       HOST_MODULES: 'auto'
       # auto 白名单：qtbase/qtsvg/qtdeclarative/qtshadertools/qttools/qtscxml/qtremoteobjects/qtgrpc/
@@ -645,7 +645,7 @@ jobs:
           try {
             $skipArgs = @()
             foreach ($m in ($env:QT_SKIP_MODULES -split '[\s,]+' | Where-Object { $_ })) {
-              # 以 - 开头的是 configure 原始参数（如 -no-feature-printsupport），其余按 -skip 模块处理
+              # 以 - 开头的是 configure 原始参数（如 -no-feature-spatialaudio），其余按 -skip 模块处理
               if ($m.StartsWith('-')) { $skipArgs += $m } else { $skipArgs += @('-skip', $m) }
             }
             # SSL 只编入 runtime 能力，不链接 OpenSSL：头文件仅用于配置期探测与 backend 插件编译

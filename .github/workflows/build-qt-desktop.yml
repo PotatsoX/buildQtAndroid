@@ -29,7 +29,7 @@ on:
       skip_modules:
         description: "要跳过的模块与特性（空格分隔）：模块名走 -skip，以 - 开头的原样传给 configure（仅 Qt6 生效）。默认沿用 Android 流程调过的集合，让完整构建能在 6 小时 job 上限内完成"
         required: false
-        default: "qtgrpc qtserialbus qtscxml qtopcua qtremoteobjects qtactiveqt qtwayland qttasktree qtcoap qtwebchannel -no-feature-printsupport -no-feature-spatialaudio -no-feature-tiff -no-feature-sql-psql -no-feature-sql-mysql -no-feature-sql-odbc -no-feature-sql-oci -no-feature-sql-db2 -no-feature-sql-ibase -no-feature-sql-mimer -no-feature-cups -no-feature-pkg-config"
+        default: "qtgrpc qtserialbus qtopcua qtremoteobjects qtactiveqt qtwayland qttasktree qtcoap qtwebchannel -no-feature-spatialaudio -no-feature-tiff -no-feature-sql-psql -no-feature-sql-mysql -no-feature-sql-odbc -no-feature-sql-oci -no-feature-sql-db2 -no-feature-sql-ibase -no-feature-sql-mimer -no-feature-cups -no-feature-pkg-config"
       make_examples_tests:
         description: "是否编译 examples 与 tests（默认不编，产物更小）"
         required: false
@@ -80,7 +80,7 @@ jobs:
           echo "qt6_matrix=$QT6_MATRIX" >> "$GITHUB_OUTPUT"
           echo "legacy_matrix=$LEGACY" >> "$GITHUB_OUTPUT"
           echo "linkage=${{ inputs.linkage || 'shared-debug-and-release' }}" >> "$GITHUB_OUTPUT"
-          echo "skip_modules=${{ inputs.skip_modules || 'qtgrpc qtserialbus qtscxml qtopcua qtremoteobjects qtactiveqt qtwayland qttasktree qtcoap qtwebchannel -no-feature-printsupport -no-feature-spatialaudio -no-feature-tiff -no-feature-sql-psql -no-feature-sql-mysql -no-feature-sql-odbc -no-feature-sql-oci -no-feature-sql-db2 -no-feature-sql-ibase -no-feature-sql-mimer -no-feature-cups -no-feature-pkg-config' }}" >> "$GITHUB_OUTPUT"
+          echo "skip_modules=${{ inputs.skip_modules || 'qtgrpc qtserialbus qtopcua qtremoteobjects qtactiveqt qtwayland qttasktree qtcoap qtwebchannel -no-feature-spatialaudio -no-feature-tiff -no-feature-sql-psql -no-feature-sql-mysql -no-feature-sql-odbc -no-feature-sql-oci -no-feature-sql-db2 -no-feature-sql-ibase -no-feature-sql-mimer -no-feature-cups -no-feature-pkg-config' }}" >> "$GITHUB_OUTPUT"
           echo "make_examples_tests=${{ inputs.make_examples_tests || false }}" >> "$GITHUB_OUTPUT"
           echo "Build plan: $(echo "$SELECTED" | jq -c .)"
 
